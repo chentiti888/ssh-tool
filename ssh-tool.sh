@@ -30,14 +30,16 @@ install_shortcut() {
         cp -f "$self" "$CMD_PATH" 2>/dev/null
     else
         # 通过 bash <(curl ...) 运行：从仓库重新下载一份
-        curl -fsSL --max-time 15 "$SCRIPT_URL" -o "$CMD_PATH" 2>/dev/null
+        curl -fsSL --retry 3 --connect-timeout 10 --max-time 40 "$SCRIPT_URL" -o "$CMD_PATH"
     fi
-    if [[ -s "$CMD_PATH" ]]; then
+    if [[ -s "$CMD_PATH" ]] && head -1 "$CMD_PATH" | grep -q '^#!'; then
         chmod +x "$CMD_PATH"
         info "已安装快捷命令：以后直接输入 ${CMD_NAME} 即可打开本菜单"
     else
         rm -f "$CMD_PATH"
-        warn "快捷命令安装失败（检查 SCRIPT_URL 是否正确）"
+        warn "快捷命令安装失败：无法从 ${SCRIPT_URL} 下载脚本，请检查网络或 SCRIPT_URL"
+        warn "可手动安装：curl -fsSL ${SCRIPT_URL} -o ${CMD_PATH} && chmod +x ${CMD_PATH}"
+        sleep 3
     fi
 }
 install_shortcut

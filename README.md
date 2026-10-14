@@ -5,16 +5,17 @@
 ## 一键安装并启动
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/chentiti888/ssh-tool/main/ssh-tool.sh)
+curl -fsSL https://raw.githubusercontent.com/chentiti888/ssh-tool/main/ssh-tool.sh -o /usr/local/bin/sshm && chmod +x /usr/local/bin/sshm && sshm
 ```
 
-首次运行会自动安装快捷命令，之后在任意目录直接输入：
+这条命令会把脚本下载为快捷命令 `sshm` 并直接打开菜单，之后在任意目录输入：
 
 ```bash
 sshm
 ```
 
-> 脚本带交互菜单，请使用 `bash <(curl ...)` 的写法，不要用 `curl ... | bash`，否则菜单无法读取输入。
+> 先下载成文件再运行，快捷命令一定会保存下来。
+> 脚本带交互菜单，不要用 `curl ... | bash`，否则菜单无法读取输入。
 > 需要 root 权限运行。
 
 ## 功能
