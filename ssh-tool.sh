@@ -15,7 +15,7 @@ err()  { echo -e "${RED}[×]${NC} $*"; }
 [[ $EUID -ne 0 ]] && { err "请使用 root 运行"; exit 1; }
 
 # ---------------- 快捷命令（想改名就改这里） ----------------
-CMD_NAME="ss"
+CMD_NAME="chen"
 CMD_PATH="/usr/local/bin/${CMD_NAME}"
 
 # 脚本在 GitHub 仓库里的 raw 地址（上传仓库后按实际仓库名修改）
