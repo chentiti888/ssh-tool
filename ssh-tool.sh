@@ -16,13 +16,27 @@ err()  { echo -e "${RED}[×]${NC} $*"; }
 
 # ---------------- 快捷命令（想改名就改这里） ----------------
 CMD_NAME="chen"
+OLD_CMDS=("sshm" "ssb")   # 曾经用过的旧命令名，运行时自动清理
 CMD_PATH="/usr/local/bin/${CMD_NAME}"
 
 # 脚本在 GitHub 仓库里的 raw 地址（上传仓库后按实际仓库名修改）
 SCRIPT_URL="https://raw.githubusercontent.com/chentiti888/ssh-tool/main/ssh-tool.sh"
 
+cleanup_old_cmds() {
+    local old p
+    for old in "${OLD_CMDS[@]}"; do
+        p="/usr/local/bin/${old}"
+        [[ "$p" == "$CMD_PATH" ]] && continue
+        # 只删除确认是本脚本的旧文件，避免误删别的程序
+        if [[ -f "$p" ]] && grep -q "SSH 小工具" "$p" 2>/dev/null; then
+            rm -f "$p" && info "已清理旧命令：${old}"
+        fi
+    done
+}
+
 install_shortcut() {
     local self
+    cleanup_old_cmds
     self=$(readlink -f "$0" 2>/dev/null)
     [[ "$self" == "$CMD_PATH" ]] && return
     if [[ -f "$self" ]]; then

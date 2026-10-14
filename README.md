@@ -5,13 +5,13 @@
 ## 一键安装并启动
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/chentiti888/ssh-tool/main/ssh-tool.sh -o /usr/local/bin/sshm && chmod +x /usr/local/bin/sshm && sshm
+curl -fsSL https://raw.githubusercontent.com/chentiti888/ssh-tool/main/ssh-tool.sh -o /usr/local/bin/chen && chmod +x /usr/local/bin/chen && chen
 ```
 
-这条命令会把脚本下载为快捷命令 `sshm` 并直接打开菜单，之后在任意目录输入：
+这条命令会把脚本下载为快捷命令 `chen` 并直接打开菜单，之后在任意目录输入：
 
 ```bash
-sshm
+chen
 ```
 
 > 先下载成文件再运行，快捷命令一定会保存下来。
@@ -70,5 +70,5 @@ sshm
 
 ## 自定义
 
-- 快捷命令名：修改脚本中的 `CMD_NAME="sshm"`。
+- 快捷命令名：修改脚本中的 `CMD_NAME="chen"`。
 - 仓库地址：修改脚本中的 `SCRIPT_URL`，用于通过 curl 运行时自动安装快捷命令。
