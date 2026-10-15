@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================
-#  SSH 小工具：修改 SSH 端口 / 生成密钥并下载
+#  SSH 小工具：修改 SSH 端口 / 生成密钥并下载 / CPU 性能测试
 #  用法：bash ssh-tool.sh
 # =============================================================
 
@@ -275,6 +275,122 @@ disable_password() {
     if sshd -t; then restart_sshd; info "已禁用密码登录"; else err "配置校验失败，未生效"; fi
 }
 
+# ---------------- 5. CPU 性能测试 ----------------
+# 优先用 sysbench (很多 VPS 测评脚本用的同一种测法, 得分可以直接对比); 装不上就用 openssl 粗测
+cpu_steal_read() {  # 输出: 总时间 steal时间
+    local _ u n s i w q sq st _r
+    read -r _ u n s i w q sq st _r < /proc/stat
+    echo "$((u + n + s + i + w + q + sq + ${st:-0})) ${st:-0}"
+}
+
+bench_ensure_sysbench() {
+    command -v sysbench >/dev/null 2>&1 && return 0
+    read -rp "需要安装测试工具 sysbench（很小，只在测试时运行），现在安装？[Y/n]: " yn
+    [[ "$yn" =~ ^[Nn]$ ]] && return 1
+    info "正在安装 sysbench ..."
+    if command -v apt-get >/dev/null; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sysbench >/dev/null 2>&1 \
+            || { apt-get update -qq >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sysbench >/dev/null 2>&1; }
+    elif command -v dnf >/dev/null; then
+        dnf install -y -q sysbench >/dev/null 2>&1 || { dnf install -y -q epel-release >/dev/null 2>&1; dnf install -y -q sysbench >/dev/null 2>&1; }
+    elif command -v yum >/dev/null; then
+        yum install -y -q sysbench >/dev/null 2>&1 || { yum install -y -q epel-release >/dev/null 2>&1; yum install -y -q sysbench >/dev/null 2>&1; }
+    elif command -v apk >/dev/null; then
+        apk add --quiet sysbench >/dev/null 2>&1
+    fi
+    command -v sysbench >/dev/null 2>&1 && { info "sysbench 已安装"; return 0; }
+    warn "sysbench 安装失败"
+    return 1
+}
+
+bench_sysbench() {  # bench_sysbench 线程数 秒数 -> 每秒事件数
+    sysbench cpu --cpu-max-prime=10000 --threads="$1" --time="$2" run 2>/dev/null |
+        awk '/events per second/{print $NF; exit}'
+}
+
+bench_openssl() {  # bench_openssl 进程数 秒数 -> SHA256 速度 MB/s
+    local out v
+    if (($1 > 1)); then out=$(openssl speed -seconds "$2" -bytes 16384 -multi "$1" sha256 2>/dev/null)
+    else out=$(openssl speed -seconds "$2" -bytes 16384 sha256 2>/dev/null); fi
+    v=$(awk '$1=="sha256"{v=$NF} END{print v}' <<< "$out")
+    if [[ -z "$v" ]]; then  # 老版本 openssl 不认 -bytes
+        if (($1 > 1)); then out=$(openssl speed -seconds "$2" -multi "$1" sha256 2>/dev/null)
+        else out=$(openssl speed -seconds "$2" sha256 2>/dev/null); fi
+        v=$(awk '$1=="sha256"{v=$NF} END{print v}' <<< "$out")
+    fi
+    v=${v%k}
+    [[ -n "$v" ]] && awk -v k="$v" 'BEGIN{printf "%.0f", k / 1024}'
+}
+
+cpu_bench() {
+    local c mode tool cores model load s1="" sm="" a="" st0 tt0 st1 tt1 steal="0" unit
+    cores=$(nproc 2>/dev/null || echo 1)
+    model=$(awk -F: '/^(model name|Model Name|Hardware|cpu model)/{print $2; exit}' /proc/cpuinfo 2>/dev/null | tr -s ' ' | sed 's/^ //')
+    [[ -z "$model" ]] && model=$(lscpu 2>/dev/null | awk -F: '/^Model name/{print $2; exit}' | tr -s ' ' | sed 's/^ //')
+    read -r load _ < /proc/loadavg
+    echo
+    echo -e "${CYAN}========== CPU 性能测试 ==========${NC}"
+    echo " 型号：${model:-未知}"
+    echo " 核心：${cores} 个    当前负载：${load}"
+    if awk -v l="$load" -v c="$cores" 'BEGIN{exit !(l > c * 0.5)}'; then
+        warn "服务器现在比较忙，测出来会偏低"
+    fi
+    echo " 1) 单核 + 多核（约 25 秒）"
+    echo " 2) 只测单核（10 秒）"
+    echo " 3) 只测多核（10 秒）"
+    echo " 0) 返回"
+    read -rp "请选择 [1]: " c
+    case "${c:-1}" in 1) mode=both ;; 2) mode=single ;; 3) mode=multi ;; *) return ;; esac
+    if bench_ensure_sysbench; then
+        tool=sysbench; unit="分"
+    elif command -v openssl >/dev/null 2>&1; then
+        tool=openssl; unit="MB/s"
+        warn "改用 openssl 粗测（SHA256 计算速度），得分和 sysbench 不能直接比"
+    else
+        err "没有可用的测试工具"; return
+    fi
+    warn "测试期间 CPU 会跑满，服务器上的网站和程序可能短暂变慢"
+    read -rp "开始测试？[Y/n]: " yn
+    [[ "$yn" =~ ^[Nn]$ ]] && return
+    echo
+    if [[ "$mode" != multi ]]; then
+        printf ' 测试单核 ...'
+        if [[ "$tool" == sysbench ]]; then s1=$(bench_sysbench 1 10); else s1=$(bench_openssl 1 5); fi
+        printf '\r\033[K'
+    fi
+    if [[ "$mode" != single ]]; then
+        printf ' 测试多核（%s 线程）...' "$cores"
+        read -r tt0 st0 < <(cpu_steal_read)
+        if [[ "$tool" == sysbench ]]; then sm=$(bench_sysbench "$cores" 10); else sm=$(bench_openssl "$cores" 5); fi
+        read -r tt1 st1 < <(cpu_steal_read)
+        printf '\r\033[K'
+        steal=$(awk -v a=$((st1 - st0)) -v b=$((tt1 - tt0)) 'BEGIN{if (b > 0) printf "%.1f", a * 100 / b; else print 0}')
+    fi
+    [[ -z "$s1$sm" ]] && { err "测试没有输出结果"; return; }
+    echo -e "${CYAN}测试结果${NC}（${tool}）"
+    [[ -n "$s1" ]] && echo -e " 单核得分：${GREEN}${s1}${NC} ${unit}"
+    [[ -n "$sm" ]] && echo -e " 多核得分：${GREEN}${sm}${NC} ${unit}（${cores} 线程）"
+    if [[ -n "$s1" && -n "$sm" ]] && ((cores > 1)); then
+        a=$(awk -v m="$sm" -v s="$s1" 'BEGIN{if (s > 0) printf "%.1f", m / s; else print 0}')
+        echo " 多核/单核：${a} 倍（理想是 ${cores} 倍）"
+    fi
+    if [[ -n "$sm" ]]; then
+        if awk -v s="$steal" 'BEGIN{exit !(s >= 10)}'; then
+            echo -e " 被宿主占用：${steal}% ${YELLOW}（偏高，这台 VPS 可能超售）${NC}"
+        else
+            echo " 被宿主占用：${steal}%"
+        fi
+    fi
+    if [[ "$tool" == sysbench ]]; then
+        echo " 得分 = sysbench 每秒计算次数，越高越好"
+    else
+        echo " 得分 = 每秒 SHA256 计算量，越高越好"
+    fi
+    if [[ -n "$a" ]] && awk -v a="$a" -v c="$cores" 'BEGIN{exit !(a < c * 0.6)}'; then
+        echo " 多核倍数明显低于核心数：可能是超线程，或核心被限速/超售"
+    fi
+}
+
 # ---------------- 菜单 ----------------
 while true; do
     echo
@@ -284,6 +400,7 @@ while true; do
     echo " 2) 生成密钥（自动加入 authorized_keys）"
     echo " 3) 下载已有密钥"
     echo " 4) 禁用密码登录（仅密钥登录）"
+    echo " 5) CPU 性能测试（单核/多核）"
     echo " 0) 退出"
     read -rp "请选择: " c
     case "$c" in
@@ -291,6 +408,7 @@ while true; do
         2) gen_key ;;
         3) download_key "" ;;
         4) disable_password ;;
+        5) cpu_bench ;;
         0) exit 0 ;;
         *) err "无效选择" ;;
     esac
