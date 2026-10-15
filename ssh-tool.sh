@@ -4,11 +4,12 @@
 #  用法：bash ssh-tool.sh
 # =============================================================
 
-TOOL_VER="1.6"   # 每次发新版改一下, 更新时会显示
+TOOL_VER="1.7"   # 每次发新版改一下, 更新时会显示
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; CYAN='\033[36m'; NC='\033[0m'
 SSHD_CONF="/etc/ssh/sshd_config"
 KEY_DIR="/root/.ssh/keys"
 
+trap 'printf "\033[?25h"' EXIT   # 万一在实时刷新时按了 Ctrl+C, 也把光标恢复
 pause() { echo; read -rp "按回车返回菜单..." _; }
 info() { echo -e "${GREEN}[√]${NC} $*"; }
 warn() { echo -e "${YELLOW}[!]${NC} $*"; }
@@ -1067,13 +1068,17 @@ cpu_usage() {
     case "${c:-1}" in
         1) echo " 正在采样 3 秒 ..."; cpu_usage_show 3 ;;
         2)
+            # 不整屏清空 (那样会闪): 旧画面留着, 新数据算好后从左上角逐行覆盖, 多出来的旧行再擦掉
+            local out line
+            printf '\033[2J\033[H\033[?25l'; echo " 正在采样 3 秒 ..."
             while true; do
-                clear 2>/dev/null || printf '\033[2J\033[H'
-                cpu_usage_show 3
-                echo; echo " （每 3 秒刷新，按回车停止）"
-                read -rt 0.1 -n 1 k && break        # 刷新间隙按回车就停
+                out=$(cpu_usage_show 3)
+                printf '\033[H'
+                while IFS= read -r line; do printf '%s\033[K\n' "$line"; done <<< "$out"
+                printf '\033[K\n （每 3 秒刷新，按回车停止）\033[K\n\033[J'
                 read -rt 1 k && break
-            done ;;
+            done
+            printf '\033[?25h' ;;
         *) return ;;
     esac
 }
@@ -1111,7 +1116,7 @@ io_bench() {
     printf ' 写入测试 2/3 ...'; w2=$(io_dd 写 "$f" "$mb"); printf '\r\033[K'
     printf ' 写入测试 3/3 ...'; w3=$(io_dd 写 "$f" "$mb"); printf '\r\033[K'
     printf ' 读取测试 ...';    r=$(io_dd 读 "$f" "$mb");  printf '\r\033[K'
-    rm -f "$f"
+    rm -f "$f"; trap - RETURN
     [[ -z "$w1$w2$w3$r" ]] && { err "测试失败（dd 没有输出结果）"; return; }
     echo -e "${CYAN}测试结果${NC}（每次 ${mb}MB）"
     echo -e " 写入：${GREEN}${w1:-失败}${NC} / ${GREEN}${w2:-失败}${NC} / ${GREEN}${w3:-失败}${NC}"
