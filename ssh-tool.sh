@@ -4,7 +4,7 @@
 #  用法：bash ssh-tool.sh
 # =============================================================
 
-TOOL_VER="1.5"   # 每次发新版改一下, 更新时会显示
+TOOL_VER="1.6"   # 每次发新版改一下, 更新时会显示
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; CYAN='\033[36m'; NC='\033[0m'
 SSHD_CONF="/etc/ssh/sshd_config"
 KEY_DIR="/root/.ssh/keys"
@@ -968,6 +968,116 @@ sys_info() {
     echo " IPv6：  ${ip6:-无}"
 }
 
+# ---------------- CPU 占用状态 ----------------
+# 读 /proc 两次 (间隔几秒) 算出这段时间的真实占用; 不装任何工具, 看完就结束
+cpu_snap() {  # cpu_snap 文件 : 记录 各核 和 各进程 的累计 CPU 时间
+    local f line rest pid
+    local -a a
+    grep '^cpu' /proc/stat > "$1.stat"
+    : > "$1.proc"
+    for f in /proc/[0-9]*/stat; do
+        read -r line < "$f" 2>/dev/null || continue
+        pid=${line%% *}
+        rest=${line##*) }              # 程序名里可能有空格, 从最后一个 ")" 后面开始数
+        read -ra a <<< "$rest"
+        echo "$pid $((a[11] + a[12]))" >> "$1.proc"   # utime + stime
+    done
+}
+
+cpu_bar() {  # cpu_bar 百分比 -> 10 格进度条
+    local n=$(( ($1 + 5) / 10 )) b=""
+    ((n > 10)) && n=10
+    for ((i = 0; i < 10; i++)); do if ((i < n)); then b+="█"; else b+="░"; fi; done
+    printf '%s' "$b"
+}
+
+cpu_usage_show() {  # cpu_usage_show 采样秒数
+    local sec=$1 t hz cores load1 load5 load15 x
+    t=$(mktemp)
+    hz=$(getconf CLK_TCK 2>/dev/null || echo 100)
+    cores=$(nproc 2>/dev/null || echo 1)
+    cpu_snap "$t.a"; sleep "$sec"; cpu_snap "$t.b"
+    read -r load1 load5 load15 _ < /proc/loadavg
+    # 总体: user nice system idle iowait irq softirq steal
+    read -r us ni sy id wa hi si st tot < <(awk '
+        FNR==NR && $1=="cpu" {for (i=2;i<=9;i++) a[i]=$i; next}
+        $1=="cpu" {t=0; for (i=2;i<=9;i++) {d[i]=$i-a[i]; t+=d[i]}; if (t<=0) t=1;
+                   for (i=2;i<=9;i++) printf "%.1f ", d[i]*100/t; print t}' "$t.a.stat" "$t.b.stat")
+    local used
+    used=$(awk -v i="$id" 'BEGIN{printf "%.0f", 100-i}')
+    echo -e "${CYAN}========== CPU 占用状态 ==========${NC}"
+    echo -e " 总占用：${GREEN}${used}%${NC}（最近 ${sec} 秒，${cores} 核平均）"
+    echo " 负载：  ${load1} / ${load5} / ${load15}（1 / 5 / 15 分钟）"
+    echo
+    echo -e "${CYAN}各核占用${NC}"
+    awk 'FNR==NR && $1~/^cpu[0-9]/ {for (i=2;i<=9;i++) a[$1,i]=$i; next}
+         $1~/^cpu[0-9]/ {t=0; idl=0; for (i=2;i<=9;i++) {d=$i-a[$1,i]; t+=d; if (i==5) idl=d}
+                          if (t<=0) t=1; printf "%s %.0f\n", substr($1,4), (t-idl)*100/t}' "$t.a.stat" "$t.b.stat" |
+    while read -r n p; do printf ' 核%-3s %s %3s%%\n' "$n" "$(cpu_bar "$p")" "$p"; done
+    echo
+    echo -e "${CYAN}占用细节${NC}"
+    printf ' 用户程序   %5s%%  网站、机器人、代理等程序自己在计算\n' "$us"
+    printf ' 系统内核   %5s%%  内核在帮程序收发数据、读写文件\n' "$sy"
+    printf ' 低优先级   %5s%%  被调低优先级的后台任务（如探针）\n' "$ni"
+    printf ' 等待硬盘   %5s%%  CPU 空等硬盘读写，高说明硬盘慢或太忙\n' "$wa"
+    printf ' 网络中断   %5s%%  处理网卡收到的数据包，流量大时会升高\n' "$(awk -v a="$hi" -v b="$si" 'BEGIN{printf "%.1f", a+b}')"
+    printf ' 被宿主占用 %5s%%  宿主机拿走的时间，高说明 VPS 超售\n' "$st"
+    printf ' 空闲       %5s%%\n' "$id"
+    echo
+    echo -e "${CYAN}最耗 CPU 的程序（100% = 占满 1 个核）${NC}"
+    printf ' %-7s %6s  %s\n' "PID" "CPU" "程序"
+    awk -v hz="$hz" -v sec="$sec" 'FNR==NR {a[$1]=$2; next} ($1 in a) {d=$2-a[$1]; if (d>0) printf "%s %.1f\n", $1, d*100/(hz*sec)}' \
+        "$t.a.proc" "$t.b.proc" | sort -k2,2nr | head -n 10 > "$t.top"
+    if [[ -s "$t.top" ]]; then
+        while read -r pid p; do
+            local name cmd
+            name=$(cat "/proc/$pid/comm" 2>/dev/null) || continue
+            cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | sed 's/ *$//')
+            printf ' %-7s %5s%%  %s\n' "$pid" "$p" "$name"
+            [[ -n "$cmd" && "$cmd" != "$name" ]] && echo "                 ${cmd:0:44}"
+        done < "$t.top"
+    else
+        echo " （这段时间没有程序明显占用 CPU）"
+    fi
+    # 简单结论
+    echo
+    x=""
+    awk -v v="$used" 'BEGIN{exit !(v >= 90)}' && x+=" CPU 基本跑满，网站/程序可能变慢；"
+    awk -v v="$wa" 'BEGIN{exit !(v >= 20)}' && x+=" 等待硬盘偏高，瓶颈在硬盘不在 CPU；"
+    awk -v v="$st" 'BEGIN{exit !(v >= 10)}' && x+=" 被宿主占用偏高，这台 VPS 可能超售；"
+    awk -v a="$hi" -v b="$si" 'BEGIN{exit !(a + b >= 20)}' && x+=" 网络中断偏高，流量很大（代理/转发）；"
+    awk -v l="$load5" -v c="$cores" 'BEGIN{exit !(l > c * 1.5)}' && x+=" 5 分钟负载超过核心数 1.5 倍，任务在排队；"
+    if [[ -s "$t.top" ]]; then
+        read -r pid p < "$t.top"
+        awk -v v="$p" 'BEGIN{exit !(v >= 90)}' &&
+            x+=" 程序 $(cat "/proc/$pid/comm" 2>/dev/null || echo "PID $pid") 占满了约 $(awk -v v="$p" 'BEGIN{printf "%.0f", v/100}') 个核；"
+    fi
+    if [[ -n "$x" ]]; then echo -e " ${YELLOW}提示：${x%；}${NC}"; else echo -e " ${GREEN}状态正常${NC}"; fi
+    rm -f "$t" "$t".*
+}
+
+cpu_usage() {
+    local c k
+    echo
+    echo -e "${CYAN}========== CPU 占用状态 ==========${NC}"
+    echo " 1) 查看一次（采样 3 秒）"
+    echo " 2) 实时刷新（每 3 秒，按回车停止）"
+    echo " 0) 返回"
+    read -rp "请选择 [1]: " c
+    case "${c:-1}" in
+        1) echo " 正在采样 3 秒 ..."; cpu_usage_show 3 ;;
+        2)
+            while true; do
+                clear 2>/dev/null || printf '\033[2J\033[H'
+                cpu_usage_show 3
+                echo; echo " （每 3 秒刷新，按回车停止）"
+                read -rt 0.1 -n 1 k && break        # 刷新间隙按回车就停
+                read -rt 1 k && break
+            done ;;
+        *) return ;;
+    esac
+}
+
 # ---------------- 硬盘 IO 测试 ----------------
 io_dd() {  # io_dd 写|读 文件 MB数 -> 速度 (如 "512 MB/s")
     local out
@@ -1091,11 +1201,12 @@ while true; do
     echo " 5) 禁用密码登录（仅密钥登录）"
     echo " 6) 恢复密码登录"
     echo " 7) 系统信息"
-    echo " 8) CPU 性能测试（单核/多核）"
-    echo " 9) 硬盘 IO 测试"
-    echo "10) BBR 加速（开启/关闭）"
-    echo "11) 端口转发（TCP/UDP）"
-    echo "12) 更新脚本"
+    echo " 8) CPU 占用状态（各核 / 细节 / 最耗 CPU 的程序）"
+    echo " 9) CPU 性能测试（单核/多核）"
+    echo "10) 硬盘 IO 测试"
+    echo "11) BBR 加速（开启/关闭）"
+    echo "12) 端口转发（TCP/UDP）"
+    echo "13) 更新脚本"
     echo -e " 0) ${RED}退出${NC}"
     read -rp "请选择: " c || exit 0
     case "$c" in
@@ -1106,11 +1217,12 @@ while true; do
         5) disable_password; pause ;;
         6) enable_password; pause ;;
         7) sys_info; pause ;;
-        8) cpu_bench; pause ;;
-        9) io_bench; pause ;;
-        10) bbr_menu; pause ;;
-        11) forward_menu ;;
-        12) update_self; pause ;;
+        8) cpu_usage; pause ;;
+        9) cpu_bench; pause ;;
+        10) io_bench; pause ;;
+        11) bbr_menu; pause ;;
+        12) forward_menu ;;
+        13) update_self; pause ;;
         0) exit 0 ;;
         *) err "无效选择" ;;
     esac
