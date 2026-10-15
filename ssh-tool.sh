@@ -4,7 +4,7 @@
 #  用法：bash ssh-tool.sh
 # =============================================================
 
-TOOL_VER="1.8"   # 每次发新版改一下, 更新时会显示
+TOOL_VER="1.9"   # 每次发新版改一下, 更新时会显示
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; CYAN='\033[36m'; NC='\033[0m'
 SSHD_CONF="/etc/ssh/sshd_config"
 KEY_DIR="/root/.ssh/keys"
@@ -1025,7 +1025,7 @@ sys_info() {
     echo " 硬盘：  ${disk}"
     echo " 运行：  ${upt}"
     echo " TCP 拥塞控制：${cc:-未知}$([[ "$cc" == bbr ]] && echo "（BBR 已开启）")"
-    echo " SSH 端口：$(current_port)    密码登录：$(pass_state)"
+    echo " SSH 端口：$(current_port)    密码登录：$(pass_state)    Ping：$(ping_state)"
     printf ' 查询公网 IP ...'
     ip4=$(curl -s4 --max-time 5 ip.sb 2>/dev/null)
     ip6=$(curl -s6 --max-time 5 ip.sb 2>/dev/null)
@@ -1233,6 +1233,50 @@ bbr_menu() {
     fi
 }
 
+# ---------------- 禁 Ping ----------------
+# 用内核参数只关掉"回应 ping", 其他 ICMP (如探测网络 MTU 用的) 照常, 不影响正常上网和代理
+PING_CONF="/etc/sysctl.d/99-disable-ping.conf"
+
+ping_state() {
+    [[ "$(sysctl -n net.ipv4.icmp_echo_ignore_all 2>/dev/null)" == 1 ]] && echo "已禁用" || echo "允许"
+}
+
+ping_menu() {
+    local yn has6=0 f
+    sysctl -n net.ipv6.icmp.echo_ignore_all >/dev/null 2>&1 && has6=1
+    echo
+    echo -e "${CYAN}========== 禁 Ping ==========${NC}"
+    echo -e " 当前：IPv4 Ping ${GREEN}$(ping_state)${NC}$( ((has6)) && [[ "$(sysctl -n net.ipv6.icmp.echo_ignore_all 2>/dev/null)" == 1 ]] && echo "，IPv6 Ping 已禁用")"
+    if [[ "$(ping_state)" == 已禁用 ]]; then
+        read -rp "恢复 Ping（允许别人 ping 通这台服务器）？[y/N]: " yn
+        [[ "$yn" =~ ^[Yy]$ ]] || return
+        rm -f "$PING_CONF"
+        sysctl -w net.ipv4.icmp_echo_ignore_all=0 >/dev/null 2>&1
+        ((has6)) && sysctl -w net.ipv6.icmp.echo_ignore_all=0 >/dev/null 2>&1
+        # 别的配置文件里也写了禁 ping 的话, 重启后还会生效, 提示一下
+        f=$(grep -lE '^[[:space:]]*net\.ipv4\.icmp_echo_ignore_all[[:space:]]*=[[:space:]]*1' /etc/sysctl.conf /etc/sysctl.d/*.conf 2>/dev/null | head -1)
+        [[ -n "$f" ]] && warn "${f} 里也设置了禁 ping，重启后会再次生效，需要的话请删掉那一行"
+        info "Ping 已恢复（当前：$(ping_state)）"
+        return
+    fi
+    echo " 禁用后：别人 ping 这台服务器会超时，扫描器更难发现它；网站、SSH、代理不受影响"
+    echo " 注意：用 ping 做监控的工具（如部分测速、在线监控）会显示这台离线；tcping 照常可用"
+    read -rp "禁用 Ping？[y/N]: " yn
+    [[ "$yn" =~ ^[Yy]$ ]] || return
+    {
+        echo "# managed by ssh-tool: 禁止回应 ping"
+        echo "net.ipv4.icmp_echo_ignore_all=1"
+        ((has6)) && echo "net.ipv6.icmp.echo_ignore_all=1"
+    } > "$PING_CONF"
+    sysctl -p "$PING_CONF" >/dev/null 2>&1
+    if [[ "$(ping_state)" == 已禁用 ]]; then
+        info "已禁用 Ping，重启后也会保持$( ((has6)) && echo "（IPv4 和 IPv6）")"
+    else
+        rm -f "$PING_CONF"
+        err "设置失败，这台 VPS 可能不允许修改内核参数（如 OpenVZ/LXC 容器）"
+    fi
+}
+
 # ---------------- 更新脚本 ----------------
 update_self() {
     local url tmp oldv newv yn
@@ -1275,8 +1319,9 @@ while true; do
     echo " 9) CPU 性能测试（单核/多核）"
     echo "10) 硬盘 IO 测试"
     echo "11) BBR 加速（开启/关闭）"
-    echo "12) 端口转发（TCP/UDP）"
-    echo "13) 更新脚本"
+    echo "12) 禁 Ping（禁用/恢复）"
+    echo "13) 端口转发（TCP/UDP）"
+    echo "14) 更新脚本"
     echo -e " 0) ${RED}退出${NC}"
     read -rp "请选择: " c || exit 0
     case "$c" in
@@ -1291,8 +1336,9 @@ while true; do
         9) cpu_bench; pause ;;
         10) io_bench; pause ;;
         11) bbr_menu; pause ;;
-        12) forward_menu ;;
-        13) update_self; pause ;;
+        12) ping_menu; pause ;;
+        13) forward_menu ;;
+        14) update_self; pause ;;
         0) exit 0 ;;
         *) err "无效选择" ;;
     esac
