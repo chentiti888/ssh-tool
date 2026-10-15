@@ -1,9 +1,10 @@
 #!/bin/bash
 # =============================================================
-#  SSH 小工具：修改 SSH 端口 / 生成密钥并下载 / CPU 性能测试 / 端口转发
+#  SSH 小工具：SSH 端口 / 密钥 / 密码登录 / 系统信息 / CPU 和硬盘测试 / BBR / 端口转发
 #  用法：bash ssh-tool.sh
 # =============================================================
 
+TOOL_VER="1.4"   # 每次发新版改一下, 更新时会显示
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; CYAN='\033[36m'; NC='\033[0m'
 SSHD_CONF="/etc/ssh/sshd_config"
 KEY_DIR="/root/.ssh/keys"
@@ -21,6 +22,8 @@ CMD_PATH="/usr/local/bin/${CMD_NAME}"
 
 # 脚本在 GitHub 仓库里的 raw 地址（上传仓库后按实际仓库名修改）
 SCRIPT_URL="https://raw.githubusercontent.com/chentiti888/ssh-tool/main/ssh-tool.sh"
+# 导入公钥时默认拉取的地址 (仓库里只能放公钥, 绝对不要放私钥)
+KEYS_URL="https://raw.githubusercontent.com/chentiti888/gy/main/authorized_keys"
 
 cleanup_old_cmds() {
     local old p
@@ -798,26 +801,315 @@ forward_menu() {
     done
 }
 
+# ---------------- 导入公钥 ----------------
+# 从 GitHub 拉文件时先查最新提交, 按提交编号下载, 避开 raw 链接几分钟的缓存
+gh_fresh_url() {  # gh_fresh_url raw地址 -> 能拿到最新内容的地址
+    local u=$1 repo branch path sha
+    if [[ "$u" =~ ^https://raw\.githubusercontent\.com/([^/]+/[^/]+)/([^/]+)/(.+)$ ]]; then
+        repo=${BASH_REMATCH[1]}; branch=${BASH_REMATCH[2]}; path=${BASH_REMATCH[3]}
+        sha=$(curl -fsSL --max-time 10 "https://api.github.com/repos/${repo}/commits/${branch}" 2>/dev/null |
+            awk -F'"' '/"sha":/{print $4; exit}')
+        [[ -n "$sha" ]] && { echo "https://raw.githubusercontent.com/${repo}/${sha}/${path}"; return; }
+    fi
+    echo "$u"
+}
+
+KEY_RE='^(ssh-(ed25519|rsa|dss)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com) [A-Za-z0-9+/]+=*( .*)?$'
+
+import_keys() {
+    local c src="" tmp line yn n=0 add=0 i blob comment fp state
+    local -a keys=()
+    echo
+    echo -e "${CYAN}========== 导入公钥 ==========${NC}"
+    echo " 1) 从仓库拉取（${KEYS_URL}）"
+    echo " 2) 手动粘贴公钥"
+    echo " 0) 返回"
+    read -rp "请选择 [1]: " c
+    tmp=$(mktemp)
+    case "${c:-1}" in
+        1)
+            info "正在拉取 ..."
+            if ! curl -fsSL --retry 2 --max-time 20 "$(gh_fresh_url "$KEYS_URL")" -o "$tmp" 2>/dev/null; then
+                rm -f "$tmp"; err "拉取失败：${KEYS_URL}"; return
+            fi
+            src="仓库" ;;
+        2)
+            echo "粘贴公钥（可以多行，以 ssh-ed25519 / ssh-rsa 等开头），粘贴完按一次回车（空行）结束："
+            while IFS= read -r line; do [[ -z "$line" ]] && break; echo "$line" >> "$tmp"; done
+            src="粘贴" ;;
+        *) rm -f "$tmp"; return ;;
+    esac
+    tr -d '\r' < "$tmp" > "$tmp.x" && mv -f "$tmp.x" "$tmp"
+    if grep -q 'PRIVATE KEY' "$tmp"; then
+        rm -f "$tmp"
+        err "内容里有【私钥】！私钥绝对不能放进仓库或发给别人，已停止导入"
+        err "请马上删掉仓库里的私钥，并重新生成一对新密钥"
+        return
+    fi
+    while IFS= read -r line; do
+        line=$(sed 's/^[[:space:]]*//; s/[[:space:]]*$//' <<< "$line")
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        if [[ "$line" =~ $KEY_RE ]]; then keys+=("$line"); else warn "跳过一行不像公钥的内容：${line:0:40}..."; fi
+    done < "$tmp"
+    rm -f "$tmp"
+    ((${#keys[@]} == 0)) && { err "没有找到可用的公钥"; return; }
+    mkdir -p /root/.ssh; chmod 700 /root/.ssh
+    touch /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys
+    echo
+    echo "从${src}读到 ${#keys[@]} 把公钥："
+    for i in "${!keys[@]}"; do
+        read -r _ blob comment <<< "${keys[i]}"
+        fp=""
+        command -v ssh-keygen >/dev/null 2>&1 && fp=$(ssh-keygen -lf <(echo "${keys[i]}") 2>/dev/null | awk '{print $2}')
+        if grep -qF "$blob" /root/.ssh/authorized_keys; then state="已存在"; else state="${GREEN}新增${NC}"; add=$((add + 1)); fi
+        echo -e "  $((i + 1))) ${keys[i]%% *}  ${comment:-（无备注）}  [${state}]"
+        [[ -n "$fp" ]] && echo "     指纹：${fp}"
+    done
+    ((add == 0)) && { info "这些公钥都已经在服务器上了，不用导入"; return; }
+    echo
+    read -rp "把 ${add} 把新公钥加入 /root/.ssh/authorized_keys？（原有的不会删除）[Y/n]: " yn
+    [[ "$yn" =~ ^[Nn]$ ]] && return
+    cp -a /root/.ssh/authorized_keys "/root/.ssh/authorized_keys.bak.$(date +%Y%m%d%H%M%S)"
+    # 原文件最后一行没换行时先补一个, 免得两把钥匙粘在一行
+    [[ -s /root/.ssh/authorized_keys && -n "$(tail -c1 /root/.ssh/authorized_keys)" ]] && echo >> /root/.ssh/authorized_keys
+    for i in "${!keys[@]}"; do
+        read -r _ blob _ <<< "${keys[i]}"
+        grep -qF "$blob" /root/.ssh/authorized_keys || { echo "${keys[i]}" >> /root/.ssh/authorized_keys; n=$((n + 1)); }
+    done
+    chmod 600 /root/.ssh/authorized_keys
+    info "已导入 ${n} 把公钥（原文件已备份）"
+    warn "请【新开一个终端】用私钥测试登录：ssh -i 私钥文件 -p $(current_port) root@服务器IP"
+    warn "确认能登录后，再用菜单 5 禁用密码登录"
+}
+
+# ---------------- 恢复密码登录 ----------------
+pass_state() {  # 当前是否允许密码登录 (以 sshd 实际生效的配置为准)
+    local v
+    v=$(sshd -T 2>/dev/null | awk '$1=="passwordauthentication"{print $2; exit}')
+    [[ "$v" == no ]] && echo "已禁用" || echo "允许"
+}
+
+enable_password() {
+    local yn prl st
+    echo -e "当前密码登录：${CYAN}$(pass_state)${NC}"
+    read -rp "确定恢复密码登录？[y/N]: " yn
+    [[ "$yn" =~ ^[Yy]$ ]] || return
+    cp -a "$SSHD_CONF" "${SSHD_CONF}.bak.$(date +%Y%m%d%H%M%S)"
+    # 主配置和 drop-in (如云厂商的 50-cloud-init.conf) 里的设置都要改, sshd 以先读到的为准
+    sed -i -E 's/^[[:space:]]*#?[[:space:]]*PasswordAuthentication.*/PasswordAuthentication yes/' "$SSHD_CONF"
+    grep -q '^PasswordAuthentication' "$SSHD_CONF" || sed -i "1i PasswordAuthentication yes" "$SSHD_CONF"
+    for f in /etc/ssh/sshd_config.d/*.conf; do
+        [[ -f "$f" ]] && sed -i -E 's/^[[:space:]]*PasswordAuthentication.*/PasswordAuthentication yes/' "$f"
+    done
+    # root 只允许密钥登录时 (prohibit-password), 密码照样登不进 root
+    prl=$(sshd -T 2>/dev/null | awk '$1=="permitrootlogin"{print $2; exit}')
+    if [[ "$prl" == prohibit-password || "$prl" == without-password || "$prl" == no ]]; then
+        warn "当前 root 不允许用密码登录（PermitRootLogin ${prl}）"
+        read -rp "同时允许 root 用密码登录？[Y/n]: " yn
+        if ! [[ "$yn" =~ ^[Nn]$ ]]; then
+            sed -i -E 's/^[[:space:]]*PermitRootLogin.*/PermitRootLogin yes/' "$SSHD_CONF"
+            grep -q '^PermitRootLogin' "$SSHD_CONF" || sed -i "1i PermitRootLogin yes" "$SSHD_CONF"
+            for f in /etc/ssh/sshd_config.d/*.conf; do
+                [[ -f "$f" ]] && sed -i -E 's/^[[:space:]]*PermitRootLogin.*/PermitRootLogin yes/' "$f"
+            done
+        fi
+    fi
+    if ! sshd -t 2>/tmp/sshd_err; then
+        err "sshd 配置校验失败，已回滚："; cat /tmp/sshd_err
+        cp -a "$(ls -t ${SSHD_CONF}.bak.* | head -1)" "$SSHD_CONF"
+        return
+    fi
+    restart_sshd
+    info "密码登录：$(pass_state)"
+    # 很多云服务器 root 默认没有密码 (已锁定), 开了密码登录也登不上
+    st=$(passwd -S root 2>/dev/null | awk '{print $2}')
+    if [[ "$st" == L || "$st" == LK || "$st" == NP ]]; then
+        warn "root 账号目前没有可用的密码，需要先设置一个"
+        read -rp "现在设置 root 密码？[Y/n]: " yn
+        [[ "$yn" =~ ^[Nn]$ ]] || passwd root
+    fi
+}
+
+# ---------------- 系统信息 ----------------
+sys_info() {
+    local os kern virt model cores load mem swap disk upt ip4 ip6 cc
+    os=$( (. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME") || uname -s )
+    kern=$(uname -r)
+    virt=$(systemd-detect-virt 2>/dev/null || echo "未知")
+    [[ "$virt" == none ]] && virt="独立服务器 / 未检测到虚拟化"
+    model=$(awk -F: '/^(model name|Model Name|Hardware|cpu model)/{print $2; exit}' /proc/cpuinfo 2>/dev/null | tr -s ' ' | sed 's/^ //')
+    cores=$(nproc 2>/dev/null || echo 1)
+    load=$(cut -d' ' -f1-3 /proc/loadavg)
+    mem=$(free -m 2>/dev/null | awk '/^Mem:/{printf "%d / %d MB (已用 %.0f%%)", $3, $2, $3*100/$2}')
+    swap=$(free -m 2>/dev/null | awk '/^Swap:/{if ($2 > 0) printf "%d / %d MB", $3, $2; else print "未开启"}')
+    disk=$(df -hP / 2>/dev/null | awk 'NR==2{printf "%s / %s (已用 %s)", $3, $2, $5}')
+    upt=$(awk '{d=int($1/86400); h=int($1%86400/3600); m=int($1%3600/60); printf "%d 天 %d 小时 %d 分", d, h, m}' /proc/uptime)
+    cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+    echo
+    echo -e "${CYAN}========== 系统信息 ==========${NC}"
+    echo " 主机名：$(hostname)"
+    echo " 系统：  ${os}（$(uname -m)）"
+    echo " 内核：  ${kern}"
+    echo " 虚拟化：${virt}"
+    echo " CPU：   ${model:-未知}（${cores} 核）"
+    echo " 负载：  ${load}"
+    echo " 内存：  ${mem}"
+    echo " Swap：  ${swap}"
+    echo " 硬盘：  ${disk}"
+    echo " 运行：  ${upt}"
+    echo " TCP 拥塞控制：${cc:-未知}$([[ "$cc" == bbr ]] && echo "（BBR 已开启）")"
+    echo " SSH 端口：$(current_port)    密码登录：$(pass_state)"
+    printf ' 查询公网 IP ...'
+    ip4=$(curl -s4 --max-time 5 ip.sb 2>/dev/null)
+    ip6=$(curl -s6 --max-time 5 ip.sb 2>/dev/null)
+    printf '\r\033[K'
+    echo " IPv4：  ${ip4:-无}"
+    echo " IPv6：  ${ip6:-无}"
+}
+
+# ---------------- 硬盘 IO 测试 ----------------
+io_dd() {  # io_dd 写|读 文件 MB数 -> 速度 (如 "512 MB/s")
+    local out
+    if [[ "$1" == 写 ]]; then
+        out=$(LC_ALL=C dd if=/dev/zero of="$2" bs=1M count="$3" oflag=direct conv=fdatasync 2>&1) ||
+            out=$(LC_ALL=C dd if=/dev/zero of="$2" bs=1M count="$3" conv=fdatasync 2>&1)   # 不支持直写的文件系统
+    else
+        sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+        out=$(LC_ALL=C dd if="$2" of=/dev/null bs=1M iflag=direct 2>&1) ||
+            out=$(LC_ALL=C dd if="$2" of=/dev/null bs=1M 2>&1)
+    fi
+    awk '/copied/{print $(NF-1), $NF}' <<< "$out"
+}
+
+io_bench() {
+    local avail mb f yn w1 w2 w3 r
+    avail=$(df -Pm /root 2>/dev/null | awk 'NR==2{print $4}')
+    if ((${avail:-0} >= 2048)); then mb=1024
+    elif ((${avail:-0} >= 600)); then mb=256
+    else err "硬盘剩余空间不足（${avail:-0} MB），无法测试"; return; fi
+    echo
+    echo -e "${CYAN}========== 硬盘 IO 测试 ==========${NC}"
+    echo " 硬盘剩余：${avail} MB"
+    warn "会临时写入一个 ${mb}MB 的测试文件（测完自动删除），期间硬盘会很忙"
+    read -rp "开始测试？[Y/n]: " yn
+    [[ "$yn" =~ ^[Nn]$ ]] && return
+    f="/root/.ssh-tool-iotest.$$"
+    trap 'rm -f "$f"' RETURN
+    echo
+    printf ' 写入测试 1/3 ...'; w1=$(io_dd 写 "$f" "$mb"); printf '\r\033[K'
+    printf ' 写入测试 2/3 ...'; w2=$(io_dd 写 "$f" "$mb"); printf '\r\033[K'
+    printf ' 写入测试 3/3 ...'; w3=$(io_dd 写 "$f" "$mb"); printf '\r\033[K'
+    printf ' 读取测试 ...';    r=$(io_dd 读 "$f" "$mb");  printf '\r\033[K'
+    rm -f "$f"
+    [[ -z "$w1$w2$w3$r" ]] && { err "测试失败（dd 没有输出结果）"; return; }
+    echo -e "${CYAN}测试结果${NC}（每次 ${mb}MB）"
+    echo -e " 写入：${GREEN}${w1:-失败}${NC} / ${GREEN}${w2:-失败}${NC} / ${GREEN}${w3:-失败}${NC}"
+    echo -e " 读取：${GREEN}${r:-失败}${NC}"
+    echo " 参考：机械硬盘约 100 MB/s，普通 SSD 300 MB/s 以上，NVMe 可达 1 GB/s 以上"
+}
+
+# ---------------- BBR ----------------
+BBR_CONF="/etc/sysctl.d/99-bbr.conf"
+
+bbr_menu() {
+    local cc yn avail
+    cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+    echo
+    echo -e "${CYAN}========== BBR 加速 ==========${NC}"
+    echo " 当前拥塞控制：${cc:-未知}    队列：$(sysctl -n net.core.default_qdisc 2>/dev/null)"
+    if [[ "$cc" == bbr ]]; then
+        echo -e " 状态：${GREEN}BBR 已开启${NC}"
+        read -rp "关闭 BBR（恢复系统默认 cubic）？[y/N]: " yn
+        [[ "$yn" =~ ^[Yy]$ ]] || return
+        rm -f "$BBR_CONF"
+        sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1
+        sysctl -w net.core.default_qdisc=fq_codel >/dev/null 2>&1
+        info "已关闭 BBR（当前：$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)）"
+        return
+    fi
+    echo " 状态：未开启"
+    echo " BBR 能明显提升高延迟、有丢包线路的速度，适合代理/中转服务器；只改内核参数，不占资源"
+    # 内核 4.9 以上才自带 BBR
+    if ! awk -v k="$(uname -r)" 'BEGIN{split(k, a, "[.-]"); exit !(a[1] > 4 || (a[1] == 4 && a[2] >= 9))}'; then
+        err "内核版本 $(uname -r) 太旧（需要 4.9 以上），请先升级内核"; return
+    fi
+    read -rp "开启 BBR？[Y/n]: " yn
+    [[ "$yn" =~ ^[Nn]$ ]] && return
+    modprobe tcp_bbr 2>/dev/null
+    avail=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null)
+    if [[ " $avail " != *" bbr "* ]]; then
+        err "这台机器的内核没有 BBR 模块（可用：${avail:-未知}）。OpenVZ/LXC 这类容器 VPS 不能自己改，需要服务商开启"
+        return
+    fi
+    printf 'net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n' > "$BBR_CONF"
+    sysctl -p "$BBR_CONF" >/dev/null 2>&1
+    cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+    if [[ "$cc" == bbr ]]; then
+        info "BBR 已开启，重启后也会保持（配置文件：${BBR_CONF}）"
+    else
+        rm -f "$BBR_CONF"
+        err "开启失败（当前：${cc:-未知}），这台 VPS 可能不允许修改内核参数"
+    fi
+}
+
+# ---------------- 更新脚本 ----------------
+update_self() {
+    local url tmp oldv newv yn
+    url=$(gh_fresh_url "$SCRIPT_URL")
+    info "正在检查更新 ..."
+    tmp=$(mktemp)
+    if ! curl -fsSL --retry 2 --max-time 30 "$url" -o "$tmp" 2>/dev/null; then
+        rm -f "$tmp"; err "下载失败：${url}"; return
+    fi
+    if ! head -1 "$tmp" | grep -q '^#!' || ! grep -q "SSH 小工具" "$tmp" || ! bash -n "$tmp" 2>/dev/null; then
+        rm -f "$tmp"; err "下载到的文件不完整或不是本脚本，已放弃更新"; return
+    fi
+    if [[ -f "$CMD_PATH" ]] && cmp -s "$tmp" "$CMD_PATH"; then
+        rm -f "$tmp"; info "已经是最新版（v${TOOL_VER}）"; return
+    fi
+    oldv=$TOOL_VER
+    newv=$(sed -n 's/^TOOL_VER="\(.*\)".*/\1/p' "$tmp" | head -1)
+    echo " 当前：v${oldv}    仓库：v${newv:-?}"
+    read -rp "现在更新？[Y/n]: " yn
+    [[ "$yn" =~ ^[Nn]$ ]] && { rm -f "$tmp"; return; }
+    install -m 755 "$tmp" "$CMD_PATH" && rm -f "$tmp" || { rm -f "$tmp"; err "写入失败"; return; }
+    info "已更新到 v${newv:-?}，正在重新打开 ..."
+    sleep 1
+    exec bash "$CMD_PATH"
+}
+
 # ---------------- 菜单 ----------------
 while true; do
     echo
-    echo -e "${CYAN}========== SSH 小工具 ==========${NC}"
-    echo -e " 当前 SSH 端口：${GREEN}$(current_port)${NC}"
+    echo -e "${CYAN}========== SSH 小工具 v${TOOL_VER} ==========${NC}"
+    echo -e " SSH 端口：${GREEN}$(current_port)${NC}    密码登录：${GREEN}$(pass_state)${NC}"
     echo " 1) 修改 SSH 端口"
     echo " 2) 生成密钥（自动加入 authorized_keys）"
-    echo " 3) 下载已有密钥"
-    echo " 4) 禁用密码登录（仅密钥登录）"
-    echo " 5) CPU 性能测试（单核/多核）"
-    echo " 6) 端口转发（TCP/UDP）"
-    echo " 0) 退出"
+    echo " 3) 导入公钥（从仓库拉取 / 粘贴）"
+    echo " 4) 下载已有密钥"
+    echo " 5) 禁用密码登录（仅密钥登录）"
+    echo " 6) 恢复密码登录"
+    echo " 7) 系统信息"
+    echo " 8) CPU 性能测试（单核/多核）"
+    echo " 9) 硬盘 IO 测试"
+    echo "10) BBR 加速（开启/关闭）"
+    echo "11) 端口转发（TCP/UDP）"
+    echo "12) 更新脚本"
+    echo -e " 0) ${RED}退出${NC}"
     read -rp "请选择: " c
     case "$c" in
         1) change_port ;;
         2) gen_key ;;
-        3) download_key "" ;;
-        4) disable_password ;;
-        5) cpu_bench ;;
-        6) forward_menu ;;
+        3) import_keys ;;
+        4) download_key "" ;;
+        5) disable_password ;;
+        6) enable_password ;;
+        7) sys_info ;;
+        8) cpu_bench ;;
+        9) io_bench ;;
+        10) bbr_menu ;;
+        11) forward_menu ;;
+        12) update_self ;;
         0) exit 0 ;;
         *) err "无效选择" ;;
     esac
