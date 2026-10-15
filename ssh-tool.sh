@@ -4,7 +4,7 @@
 #  用法：bash ssh-tool.sh
 # =============================================================
 
-TOOL_VER="1.7"   # 每次发新版改一下, 更新时会显示
+TOOL_VER="1.8"   # 每次发新版改一下, 更新时会显示
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; CYAN='\033[36m'; NC='\033[0m'
 SSHD_CONF="/etc/ssh/sshd_config"
 KEY_DIR="/root/.ssh/keys"
@@ -25,7 +25,15 @@ CMD_PATH="/usr/local/bin/${CMD_NAME}"
 # 脚本在 GitHub 仓库里的 raw 地址（上传仓库后按实际仓库名修改）
 SCRIPT_URL="https://raw.githubusercontent.com/chentiti888/ssh-tool/main/ssh-tool.sh"
 # 导入公钥时默认拉取的地址 (仓库里只能放公钥, 绝对不要放私钥)
-KEYS_URL="https://raw.githubusercontent.com/chentiti888/gy/main/authorized_keys"
+KEYS_URL_DEFAULT="https://raw.githubusercontent.com/chentiti888/gy/main/authorized_keys"
+# 在菜单里改过的地址存在这个文件里 (不在脚本里, 所以更新脚本也不会丢)
+TOOL_CONF="/etc/ssh-tool.conf"
+KEYS_URL="$KEYS_URL_DEFAULT"
+if [[ -f "$TOOL_CONF" ]]; then
+    _u=$(sed -n 's/^KEYS_URL=//p' "$TOOL_CONF" | tail -1)
+    [[ "$_u" =~ ^https:// ]] && KEYS_URL="$_u"
+    unset _u
+fi
 
 cleanup_old_cmds() {
     local old p
@@ -818,13 +826,69 @@ gh_fresh_url() {  # gh_fresh_url raw地址 -> 能拿到最新内容的地址
 
 KEY_RE='^(ssh-(ed25519|rsa|dss)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com) [A-Za-z0-9+/]+=*( .*)?$'
 
+keys_url_normalize() {  # 把各种写法统一成能直接下载的地址
+    local u=$1
+    u=$(sed 's/^[[:space:]]*//; s/[[:space:]]*$//' <<< "$u")
+    if [[ "$u" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+        # 用户名/仓库名 -> 仓库 main 分支根目录的 authorized_keys
+        u="https://raw.githubusercontent.com/${u}/main/authorized_keys"
+    elif [[ "$u" =~ ^https://github\.com/([^/]+/[^/]+)/blob/(.+)$ ]]; then
+        # 网页上的文件地址 -> raw 地址
+        u="https://raw.githubusercontent.com/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    elif [[ "$u" =~ ^https://github\.com/([^/]+/[^/.]+)/?$ ]]; then
+        # 只给了仓库首页
+        u="https://raw.githubusercontent.com/${BASH_REMATCH[1]}/main/authorized_keys"
+    elif [[ "$u" =~ ^[A-Za-z0-9-]+$ ]]; then
+        # 只给了 GitHub 用户名 -> 这个账号在 GitHub 上登记的所有公钥
+        u="https://github.com/${u}.keys"
+    fi
+    echo "$u"
+}
+
+keys_url_set() {
+    local u n yn
+    echo
+    echo " 当前地址：${KEYS_URL}"
+    [[ "$KEYS_URL" == "$KEYS_URL_DEFAULT" ]] && echo " （默认地址）"
+    echo " 可以填："
+    echo "   用户名/仓库名           如 chentiti888/gy（取 main 分支的 authorized_keys）"
+    echo "   GitHub 文件网页地址     如 https://github.com/用户/仓库/blob/main/文件"
+    echo "   GitHub 用户名           如 chentiti888（取账号设置里登记的公钥）"
+    echo "   任意 https 直链"
+    echo "   输入 default 恢复默认地址"
+    read -rp "新地址（回车取消）: " u
+    [[ -z "$u" ]] && return
+    if [[ "$u" == default ]]; then
+        u=$KEYS_URL_DEFAULT
+    else
+        u=$(keys_url_normalize "$u")
+    fi
+    [[ "$u" =~ ^https:// ]] || { err "地址要以 https:// 开头：$u"; return; }
+    echo " 解析为：${u}"
+    info "正在试拉一次 ..."
+    n=$(curl -fsSL --max-time 20 "$(gh_fresh_url "$u")" 2>/dev/null | tr -d '\r' | grep -cE "$KEY_RE")
+    if ((n > 0)); then
+        info "能拉到 ${n} 把公钥"
+    else
+        warn "这个地址没拉到公钥（地址不对、仓库是私有的，或文件里没有公钥）"
+        read -rp "仍然保存这个地址？[y/N]: " yn
+        [[ "$yn" =~ ^[Yy]$ ]] || return
+    fi
+    KEYS_URL=$u
+    { grep -v '^KEYS_URL=' "$TOOL_CONF" 2>/dev/null; echo "KEYS_URL=$u"; } > "$TOOL_CONF.tmp" && mv -f "$TOOL_CONF.tmp" "$TOOL_CONF"
+    chmod 600 "$TOOL_CONF"
+    info "已保存，以后从这个地址拉取（保存在 ${TOOL_CONF}，更新脚本也不会丢）"
+}
+
 import_keys() {
     local c src="" tmp line yn n=0 add=0 i blob comment fp state
     local -a keys=()
     echo
     echo -e "${CYAN}========== 导入公钥 ==========${NC}"
-    echo " 1) 从仓库拉取（${KEYS_URL}）"
+    echo " 1) 从仓库拉取"
+    echo "    ${KEYS_URL}"
     echo " 2) 手动粘贴公钥"
+    echo " 3) 修改拉取地址"
     echo " 0) 返回"
     read -rp "请选择 [1]: " c
     tmp=$(mktemp)
@@ -839,6 +903,7 @@ import_keys() {
             echo "粘贴公钥（可以多行，以 ssh-ed25519 / ssh-rsa 等开头），粘贴完按一次回车（空行）结束："
             while IFS= read -r line; do [[ -z "$line" ]] && break; echo "$line" >> "$tmp"; done
             src="粘贴" ;;
+        3) rm -f "$tmp"; keys_url_set; return ;;
         *) rm -f "$tmp"; return ;;
     esac
     tr -d '\r' < "$tmp" > "$tmp.x" && mv -f "$tmp.x" "$tmp"
