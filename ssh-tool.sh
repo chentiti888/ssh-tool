@@ -4,11 +4,12 @@
 #  用法：bash ssh-tool.sh
 # =============================================================
 
-TOOL_VER="1.4"   # 每次发新版改一下, 更新时会显示
+TOOL_VER="1.5"   # 每次发新版改一下, 更新时会显示
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; CYAN='\033[36m'; NC='\033[0m'
 SSHD_CONF="/etc/ssh/sshd_config"
 KEY_DIR="/root/.ssh/keys"
 
+pause() { echo; read -rp "按回车返回菜单..." _; }
 info() { echo -e "${GREEN}[√]${NC} $*"; }
 warn() { echo -e "${YELLOW}[!]${NC} $*"; }
 err()  { echo -e "${RED}[×]${NC} $*"; }
@@ -789,12 +790,12 @@ forward_menu() {
         echo " 3) 清空全部转发规则"
         echo " 4) 查看当前转发规则"
         echo " 0) 返回"
-        read -rp "请选择: " c
+        read -rp "请选择: " c || return
         case "$c" in
-            1) fwd_add ;;
-            2) fwd_delete ;;
-            3) fwd_clear_all ;;
-            4) fwd_list ;;
+            1) fwd_add; pause ;;
+            2) fwd_delete; pause ;;
+            3) fwd_clear_all; pause ;;
+            4) fwd_list; pause ;;
             0|q|Q) return ;;
             *) warn "无效选择：$c" ;;
         esac
@@ -1096,20 +1097,20 @@ while true; do
     echo "11) 端口转发（TCP/UDP）"
     echo "12) 更新脚本"
     echo -e " 0) ${RED}退出${NC}"
-    read -rp "请选择: " c
+    read -rp "请选择: " c || exit 0
     case "$c" in
-        1) change_port ;;
-        2) gen_key ;;
-        3) import_keys ;;
-        4) download_key "" ;;
-        5) disable_password ;;
-        6) enable_password ;;
-        7) sys_info ;;
-        8) cpu_bench ;;
-        9) io_bench ;;
-        10) bbr_menu ;;
+        1) change_port; pause ;;
+        2) gen_key; pause ;;
+        3) import_keys; pause ;;
+        4) download_key ""; pause ;;
+        5) disable_password; pause ;;
+        6) enable_password; pause ;;
+        7) sys_info; pause ;;
+        8) cpu_bench; pause ;;
+        9) io_bench; pause ;;
+        10) bbr_menu; pause ;;
         11) forward_menu ;;
-        12) update_self ;;
+        12) update_self; pause ;;
         0) exit 0 ;;
         *) err "无效选择" ;;
     esac
