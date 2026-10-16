@@ -4,7 +4,7 @@
 #  用法：bash ssh-tool.sh
 # =============================================================
 
-TOOL_VER="1.9"   # 每次发新版改一下, 更新时会显示
+TOOL_VER="2.0"   # 每次发新版改一下, 更新时会显示
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; CYAN='\033[36m'; NC='\033[0m'
 SSHD_CONF="/etc/ssh/sshd_config"
 KEY_DIR="/root/.ssh/keys"
@@ -1034,6 +1034,71 @@ sys_info() {
     echo " IPv6：  ${ip6:-无}"
 }
 
+# ---------------- 内存性能测试 ----------------
+bench_sysbench_mem() {  # bench_sysbench_mem read|write 线程数 秒数 -> MB/s
+    sysbench memory --memory-block-size=1M --memory-total-size=100T --memory-oper="$1" \
+        --threads="$2" --time="$3" run 2>/dev/null |
+        sed -n 's/.*(\([0-9.]*\) MiB\/sec).*/\1/p' | head -1 | awk '{printf "%.0f", $1}'
+}
+
+bench_dd_mem() {  # 没有 sysbench 时: 内核在内存里搬数据的速度 -> MB/s
+    LC_ALL=C dd if=/dev/zero of=/dev/null bs=1M count=20000 2>&1 |
+        awk '/copied/{v=$(NF-1); u=$NF; if (u ~ /^GB/) v*=1000; else if (u ~ /^kB/) v/=1000; printf "%.0f", v}'
+}
+
+mem_bench() {
+    local yn total avail swapu cores tool r1="" w1="" rm="" wm="" d=""
+    cores=$(nproc 2>/dev/null || echo 1)
+    total=$(awk '/^MemTotal:/{printf "%d", $2/1024}' /proc/meminfo)
+    avail=$(awk '/^MemAvailable:/{printf "%d", $2/1024}' /proc/meminfo)
+    swapu=$(awk '/^SwapTotal:/{t=$2} /^SwapFree:/{f=$2} END{printf "%d", (t-f)/1024}' /proc/meminfo)
+    echo
+    echo -e "${CYAN}========== 内存性能测试 ==========${NC}"
+    echo " 内存：${total} MB    可用：${avail} MB    Swap 已用：${swapu} MB"
+    ((swapu > 100)) && warn "Swap 用了 ${swapu} MB，说明内存曾经不够用，测试结果可能偏低"
+    echo " 测试内容：单线程读 / 写，多线程读 / 写（各 5 秒，约 20 秒）"
+    echo " 只在内存里反复读写一小块数据，不会占满内存，也不写硬盘"
+    if bench_ensure_sysbench; then
+        tool=sysbench
+    else
+        tool=dd
+        warn "改用 dd 粗测（只测一项搬运速度），结果和 sysbench 不能直接比"
+    fi
+    read -rp "开始测试？[Y/n]: " yn
+    [[ "$yn" =~ ^[Nn]$ ]] && return
+    echo
+    if [[ "$tool" == sysbench ]]; then
+        printf ' 单线程读 ...'; r1=$(bench_sysbench_mem read 1 5); printf '\r\033[K'
+        printf ' 单线程写 ...'; w1=$(bench_sysbench_mem write 1 5); printf '\r\033[K'
+        if ((cores > 1)); then
+            printf ' 多线程读（%s 线程）...' "$cores"; rm=$(bench_sysbench_mem read "$cores" 5); printf '\r\033[K'
+            printf ' 多线程写（%s 线程）...' "$cores"; wm=$(bench_sysbench_mem write "$cores" 5); printf '\r\033[K'
+        fi
+        [[ -z "$r1$w1" ]] && { err "测试没有输出结果"; return; }
+        echo -e "${CYAN}测试结果${NC}（sysbench，单位 MB/s，越高越好）"
+        echo -e " 单线程读：${GREEN}${r1:-失败}${NC}"
+        echo -e " 单线程写：${GREEN}${w1:-失败}${NC}"
+        if ((cores > 1)); then
+            echo -e " 多线程读：${GREEN}${rm:-失败}${NC}（${cores} 线程）"
+            echo -e " 多线程写：${GREEN}${wm:-失败}${NC}（${cores} 线程）"
+        fi
+        echo
+        echo " 说明："
+        echo "  单线程 = 一个程序能用到的内存速度，影响网站/机器人的响应快慢"
+        echo "  多线程 = 多个程序同时读写时的总速度，看整机内存带宽"
+        if [[ -n "$r1" && -n "$rm" ]] && ((cores > 1)) && awk -v a="$rm" -v b="$r1" 'BEGIN{exit !(a < b * 1.2)}'; then
+            echo -e "  ${YELLOW}多线程几乎没有比单线程快：内存带宽可能被限制，或多个核在争抢${NC}"
+        fi
+        echo "  同配置的机器之间对比才有意义；多测几次差距很大，可能是宿主机繁忙或超售"
+    else
+        printf ' 测试中 ...'; d=$(bench_dd_mem); printf '\r\033[K'
+        [[ -z "$d" ]] && { err "测试没有输出结果"; return; }
+        echo -e "${CYAN}测试结果${NC}（dd 粗测）"
+        echo -e " 内存搬运速度：${GREEN}${d}${NC} MB/s"
+        echo "  这是内核在内存里搬数据的速度，只适合同一种方法互相比较；装上 sysbench 结果更全面"
+    fi
+}
+
 # ---------------- CPU 占用状态 ----------------
 # 读 /proc 两次 (间隔几秒) 算出这段时间的真实占用; 不装任何工具, 看完就结束
 cpu_snap() {  # cpu_snap 文件 : 记录 各核 和 各进程 的累计 CPU 时间
@@ -1317,11 +1382,12 @@ while true; do
     echo " 7) 系统信息"
     echo " 8) CPU 占用状态（各核 / 细节 / 最耗 CPU 的程序）"
     echo " 9) CPU 性能测试（单核/多核）"
-    echo "10) 硬盘 IO 测试"
-    echo "11) BBR 加速（开启/关闭）"
-    echo "12) 禁 Ping（禁用/恢复）"
-    echo "13) 端口转发（TCP/UDP）"
-    echo "14) 更新脚本"
+    echo "10) 内存性能测试（读/写速度）"
+    echo "11) 硬盘 IO 测试"
+    echo "12) BBR 加速（开启/关闭）"
+    echo "13) 禁 Ping（禁用/恢复）"
+    echo "14) 端口转发（TCP/UDP）"
+    echo "15) 更新脚本"
     echo -e " 0) ${RED}退出${NC}"
     read -rp "请选择: " c || exit 0
     case "$c" in
@@ -1334,11 +1400,12 @@ while true; do
         7) sys_info; pause ;;
         8) cpu_usage; pause ;;
         9) cpu_bench; pause ;;
-        10) io_bench; pause ;;
-        11) bbr_menu; pause ;;
-        12) ping_menu; pause ;;
-        13) forward_menu ;;
-        14) update_self; pause ;;
+        10) mem_bench; pause ;;
+        11) io_bench; pause ;;
+        12) bbr_menu; pause ;;
+        13) ping_menu; pause ;;
+        14) forward_menu ;;
+        15) update_self; pause ;;
         0) exit 0 ;;
         *) err "无效选择" ;;
     esac
