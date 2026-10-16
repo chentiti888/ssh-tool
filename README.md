@@ -8,7 +8,7 @@
 curl -fsSL https://raw.githubusercontent.com/chentiti888/ssh-tool/main/ssh-tool.sh -o /usr/local/bin/chen && chmod +x /usr/local/bin/chen && chen
 ```
 
-这条命令会把脚本下载为快捷命令 `chen` 并直接打开菜单，之后在任意目录输入：
+这条命令会把脚本下载为快捷命令 `cc` 并直接打开菜单，之后在任意目录输入：
 
 ```bash
 chen
