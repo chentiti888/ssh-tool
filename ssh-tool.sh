@@ -4,7 +4,7 @@
 #  用法：bash ssh-tool.sh
 # =============================================================
 
-TOOL_VER="2.1"   # 每次发新版改一下, 更新时会显示
+TOOL_VER="2.3"   # 每次发新版改一下, 更新时会显示
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; CYAN='\033[36m'; NC='\033[0m'
 SSHD_CONF="/etc/ssh/sshd_config"
 KEY_DIR="/root/.ssh/keys"
@@ -229,35 +229,76 @@ download_key() {
     case "$m" in
     2)
         command -v python3 >/dev/null || { err "需要 python3"; return; }
-        local dport token tmp
-        dport=$((RANDOM % 10000 + 40000))
+        local dport token tmp dip rc
+        # 链接里的 IP 用这次 SSH 连进来的地址 (NAT/中转机器上, 出口 IP 和入口 IP 可能不一样)
+        dip=$(awk '{print $3}' <<< "${SSH_CONNECTION:-}")
+        if [[ -z "$dip" || "$dip" =~ ^(10\.|127\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.) || "$dip" == *:* ]]; then
+            dip=$ip
+        fi
+        echo
+        echo " NAT 机器（SSH 端口是服务商分配的那种）要填服务商给你转发好的端口，否则外面连不上"
+        read -rp "下载端口（回车随机）: " dport
+        if [[ -z "$dport" ]]; then
+            dport=$((RANDOM % 10000 + 40000))
+        elif ! [[ "$dport" =~ ^[0-9]+$ ]] || ((dport < 1 || dport > 65535)); then
+            err "端口无效"; return
+        fi
+        if ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${dport}$"; then
+            err "端口 ${dport} 已被占用，换一个"; return
+        fi
         token=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
         tmp=$(mktemp -d)
         cp "$keyfile" "${tmp}/${token}"
         open_firewall "$dport"
         warn "私钥将通过明文 HTTP 传输，下载完成后建议删除并重新生成"
-        echo -e "下载链接：${CYAN}http://${ip}:${dport}/${token}${NC}"
-        echo "（云服务器需在安全组临时放行 ${dport}/tcp；等待下载中，Ctrl+C 取消）"
-        python3 - "$tmp" "$dport" "$token" <<'PY'
+        echo -e "下载链接：${CYAN}http://${dip}:${dport}/${token}${NC}"
+        echo " 用手机/电脑浏览器打开链接，会下载一个名为 ${keyfile##*/} 的文件（在浏览器的"下载"里）"
+        echo " 或在电脑上执行：curl -o ${keyfile##*/} http://${dip}:${dport}/${token}"
+        echo " （云服务器需在安全组放行 ${dport}/tcp；120 秒内没人下载自动关闭；按 Ctrl+C 取消）"
+        # Ctrl+C 只结束下载服务, 不让整个脚本退出, 这样后面的清理一定会执行
+        trap ':' INT
+        python3 - "$tmp" "$dport" "$token" "${keyfile##*/}" <<'PY'
 import http.server, sys, os, threading
-d, port, token = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-os.chdir(d)
-class H(http.server.SimpleHTTPRequestHandler):
+d, port, token, name = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+data = open(os.path.join(d, token), "rb").read()
+result = {"ok": False}
+class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.strip('/') != token:
             self.send_error(404); return
-        super().do_GET()
+        # 告诉浏览器这是要下载的文件, 并用密钥名作为文件名 (不然会保存成一串随机字符)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Disposition", 'attachment; filename="%s"' % name)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+        result["ok"] = True
         threading.Thread(target=self.server.shutdown, daemon=True).start()
     def log_message(self, *a): pass
-s = http.server.HTTPServer(('0.0.0.0', port), H)
-threading.Timer(120, s.shutdown).start()
-s.serve_forever()
+try:
+    s = http.server.HTTPServer(('0.0.0.0', port), H)
+except OSError as e:
+    print(" 无法监听端口 %d：%s" % (port, e)); sys.exit(2)
+t = threading.Timer(120, s.shutdown); t.daemon = True; t.start()
+try:
+    s.serve_forever()
+except KeyboardInterrupt:
+    print("\n 已取消下载"); sys.exit(1)
+sys.exit(0 if result["ok"] else 3)
 PY
+        rc=$?
+        trap - INT
         rm -rf "$tmp"
         command -v ufw >/dev/null && ufw delete allow "${dport}/tcp" >/dev/null 2>&1
         command -v firewall-cmd >/dev/null && { firewall-cmd --permanent --remove-port="${dport}/tcp" >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1; }
         iptables -D INPUT -p tcp --dport "$dport" -j ACCEPT 2>/dev/null
-        info "临时下载服务已关闭"
+        case $rc in
+            0) info "已下载，临时下载服务已关闭" ;;
+            3) warn "120 秒内没有人下载，已自动关闭。连不上的话：检查安全组是否放行 ${dport}/tcp，NAT 机器要用转发好的端口" ;;
+            *) info "临时下载服务已关闭" ;;
+        esac
         ;;
     3)
         echo -e "在本地电脑执行：\n${CYAN}scp -P ${port} root@${ip}:${keyfile} ./${keyfile##*/}${NC}"
