@@ -11,7 +11,7 @@ curl -fsSL https://raw.githubusercontent.com/chentiti888/ssh-tool/main/ssh-tool.
 这条命令会把脚本下载为快捷命令 `cc` 并直接打开菜单，之后在任意目录输入：
 
 ```bash
-chen
+cc
 ```
 
 > 先下载成文件再运行，快捷命令一定会保存下来。
