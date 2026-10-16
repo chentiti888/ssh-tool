@@ -4,7 +4,7 @@
 #  用法：bash ssh-tool.sh
 # =============================================================
 
-TOOL_VER="2.0"   # 每次发新版改一下, 更新时会显示
+TOOL_VER="2.1"   # 每次发新版改一下, 更新时会显示
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; CYAN='\033[36m'; NC='\033[0m'
 SSHD_CONF="/etc/ssh/sshd_config"
 KEY_DIR="/root/.ssh/keys"
@@ -946,7 +946,7 @@ import_keys() {
     chmod 600 /root/.ssh/authorized_keys
     info "已导入 ${n} 把公钥（原文件已备份）"
     warn "请【新开一个终端】用私钥测试登录：ssh -i 私钥文件 -p $(current_port) root@服务器IP"
-    warn "确认能登录后，再用菜单 5 禁用密码登录"
+    warn "确认能登录后，再到 SSH 安全 → 5 禁用密码登录"
 }
 
 # ---------------- 恢复密码登录 ----------------
@@ -1369,44 +1369,94 @@ update_self() {
 }
 
 # ---------------- 菜单 ----------------
+menu_ssh() {  # SSH 安全
+    local c
+    while true; do
+        echo
+        echo -e "${CYAN}========== SSH 安全 ==========${NC}"
+        echo -e " SSH 端口：${GREEN}$(current_port)${NC}    密码登录：${GREEN}$(pass_state)${NC}"
+        echo " 1) 修改 SSH 端口"
+        echo " 2) 生成密钥（自动加入 authorized_keys）"
+        echo " 3) 导入公钥（从仓库拉取 / 粘贴）"
+        echo " 4) 下载已有密钥"
+        echo " 5) 禁用密码登录（仅密钥登录）"
+        echo " 6) 恢复密码登录"
+        echo -e " 0) ${GREEN}返回${NC}"
+        read -rp "请选择: " c || return
+        case "$c" in
+            1) change_port; pause ;;
+            2) gen_key; pause ;;
+            3) import_keys; pause ;;
+            4) download_key ""; pause ;;
+            5) disable_password; pause ;;
+            6) enable_password; pause ;;
+            0|q|Q) return ;;
+            *) err "无效选择" ;;
+        esac
+    done
+}
+
+menu_perf() {  # 性能检测
+    local c
+    while true; do
+        echo
+        echo -e "${CYAN}========== 性能检测 ==========${NC}"
+        echo " 1) CPU 占用状态（各核 / 细节 / 最耗 CPU 的程序）"
+        echo " 2) CPU 性能测试（单核/多核）"
+        echo " 3) 内存性能测试（读/写速度）"
+        echo " 4) 硬盘 IO 测试"
+        echo -e " 0) ${GREEN}返回${NC}"
+        read -rp "请选择: " c || return
+        case "$c" in
+            1) cpu_usage; pause ;;
+            2) cpu_bench; pause ;;
+            3) mem_bench; pause ;;
+            4) io_bench; pause ;;
+            0|q|Q) return ;;
+            *) err "无效选择" ;;
+        esac
+    done
+}
+
+menu_net() {  # 网络设置
+    local c
+    while true; do
+        echo
+        echo -e "${CYAN}========== 网络设置 ==========${NC}"
+        echo -e " BBR：${GREEN}$([[ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" == bbr ]] && echo 已开启 || echo 未开启)${NC}    Ping：${GREEN}$(ping_state)${NC}"
+        echo " 1) BBR 加速（开启/关闭）"
+        echo " 2) 禁 Ping（禁用/恢复）"
+        echo " 3) 端口转发（TCP/UDP）"
+        echo -e " 0) ${GREEN}返回${NC}"
+        read -rp "请选择: " c || return
+        case "$c" in
+            1) bbr_menu; pause ;;
+            2) ping_menu; pause ;;
+            3) forward_menu ;;
+            0|q|Q) return ;;
+            *) err "无效选择" ;;
+        esac
+    done
+}
+
 while true; do
     echo
     echo -e "${CYAN}========== SSH 小工具 v${TOOL_VER} ==========${NC}"
     echo -e " SSH 端口：${GREEN}$(current_port)${NC}    密码登录：${GREEN}$(pass_state)${NC}"
-    echo " 1) 修改 SSH 端口"
-    echo " 2) 生成密钥（自动加入 authorized_keys）"
-    echo " 3) 导入公钥（从仓库拉取 / 粘贴）"
-    echo " 4) 下载已有密钥"
-    echo " 5) 禁用密码登录（仅密钥登录）"
-    echo " 6) 恢复密码登录"
-    echo " 7) 系统信息"
-    echo " 8) CPU 占用状态（各核 / 细节 / 最耗 CPU 的程序）"
-    echo " 9) CPU 性能测试（单核/多核）"
-    echo "10) 内存性能测试（读/写速度）"
-    echo "11) 硬盘 IO 测试"
-    echo "12) BBR 加速（开启/关闭）"
-    echo "13) 禁 Ping（禁用/恢复）"
-    echo "14) 端口转发（TCP/UDP）"
-    echo "15) 更新脚本"
+    echo " 1) 系统信息"
+    echo " 2) SSH 安全      端口 / 密钥 / 密码登录"
+    echo " 3) 性能检测      CPU 占用 / CPU / 内存 / 硬盘"
+    echo " 4) 网络设置      BBR / 禁 Ping / 端口转发"
+    echo " 5) 更新脚本"
     echo -e " 0) ${RED}退出${NC}"
     read -rp "请选择: " c || exit 0
     case "$c" in
-        1) change_port; pause ;;
-        2) gen_key; pause ;;
-        3) import_keys; pause ;;
-        4) download_key ""; pause ;;
-        5) disable_password; pause ;;
-        6) enable_password; pause ;;
-        7) sys_info; pause ;;
-        8) cpu_usage; pause ;;
-        9) cpu_bench; pause ;;
-        10) mem_bench; pause ;;
-        11) io_bench; pause ;;
-        12) bbr_menu; pause ;;
-        13) ping_menu; pause ;;
-        14) forward_menu ;;
-        15) update_self; pause ;;
-        0) exit 0 ;;
+        1) sys_info; pause ;;
+        2) menu_ssh ;;
+        3) menu_perf ;;
+        4) menu_net ;;
+        5) update_self; pause ;;
+        0|q|Q) exit 0 ;;
         *) err "无效选择" ;;
     esac
 done
