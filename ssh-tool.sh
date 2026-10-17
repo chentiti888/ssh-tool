@@ -4,7 +4,7 @@
 #  用法：bash ssh-tool.sh
 # =============================================================
 
-TOOL_VER="2.7"   # 每次发新版改一下, 更新时会显示
+TOOL_VER="2.9"   # 每次发新版改一下, 更新时会显示
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; CYAN='\033[36m'; NC='\033[0m'
 SSHD_CONF="/etc/ssh/sshd_config"
 KEY_DIR="/root/.ssh/keys"
@@ -1533,7 +1533,7 @@ route_check() {
 }
 
 # ---------------- 流媒体 / AI 解锁检测 ----------------
-# 判断方法参考开源项目 lmc999/RegionRestrictionCheck; 平台改版后可能不准, 结果仅供参考
+# 按各平台网页/接口的返回特征判断; 平台改版后可能不准, 结果仅供参考
 UA_WEB="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 
 ul_netflix() {
@@ -1623,19 +1623,12 @@ unlock_check() {
     echo -e "${CYAN}========== 流媒体 / AI 解锁检测 ==========${NC}"
     echo " 1) 用 IPv4 检测"
     echo " 2) 用 IPv6 检测"
-    echo " 3) 完整检测（运行第三方脚本 RegionRestrictionCheck，项目更多更准）"
     echo -e " 0) ${GREEN}返回${NC}"
     read -rp "请选择 [1]: " c
     case "${c:-1}" in
         1) UL_OPT="-4 --max-time 10" ;;
         2) curl -6 -s --max-time 5 https://www.cloudflare.com/cdn-cgi/trace >/dev/null 2>&1 || { err "这台服务器没有可用的 IPv6"; return; }
            UL_OPT="-6 --max-time 10" ;;
-        3)
-            warn "将下载并以 root 运行第三方脚本（github.com/lmc999/RegionRestrictionCheck），请确认你信任它"
-            read -rp "继续？[y/N]: " c
-            [[ "$c" =~ ^[Yy]$ ]] || return
-            bash <(curl -L -s https://raw.githubusercontent.com/lmc999/RegionRestrictionCheck/main/check.sh) -M 4
-            return ;;
         *) return ;;
     esac
     ipinfo=$(curl $UL_OPT -s https://www.cloudflare.com/cdn-cgi/trace)
@@ -1658,7 +1651,7 @@ unlock_check() {
     done
     rm -rf "$t"
     echo
-    echo " 说明：结果按各平台网页的特征判断，平台改版后可能不准；Disney+ 只做了简易判断，要准确请用 3 完整检测"
+    echo " 说明：结果按各平台网页的特征判断，平台改版后可能不准；Disney+ 只做了简易判断"
 }
 
 # ---------------- 更新脚本 ----------------
