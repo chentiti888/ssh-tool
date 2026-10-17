@@ -4,7 +4,7 @@
 #  用法：bash ssh-tool.sh
 # =============================================================
 
-TOOL_VER="2.6"   # 每次发新版改一下, 更新时会显示
+TOOL_VER="2.7"   # 每次发新版改一下, 更新时会显示
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; CYAN='\033[36m'; NC='\033[0m'
 SSHD_CONF="/etc/ssh/sshd_config"
 KEY_DIR="/root/.ssh/keys"
@@ -1602,11 +1602,17 @@ ul_claude() {
 }
 
 ul_gemini() {
+    # 用 Gemini API 判断: 故意不带有效 key, 地区支持时返回 "API key not valid", 不支持时返回 "location is not supported"
+    # (网页里的特征字符串会随改版失效, 接口的这两种报错更稳定)
     local r cc
+    r=$(curl $UL_OPT -s 'https://generativelanguage.googleapis.com/v1beta/models?key=ssb-check' -A "$UA_WEB")
+    cc=$(curl $UL_OPT -s 'https://www.cloudflare.com/cdn-cgi/trace' | sed -n 's/^loc=//p')
+    if grep -qi 'location is not supported' <<< "$r"; then echo "N 不支持${cc:+（地区 $cc）}"; return; fi
+    if grep -qiE 'API key not valid|API_KEY_INVALID' <<< "$r"; then echo "Y 支持${cc:+（地区 $cc）}"; return; fi
+    # 接口没给出明确结果时, 退回网页判断
     r=$(curl $UL_OPT -sL 'https://gemini.google.com' -A "$UA_WEB")
     [[ -z "$r" ]] && { echo "? 检测失败（连不上）"; return; }
-    cc=$(grep -o ',2,1,200,"[A-Z]\{3\}"' <<< "$r" | head -1 | sed 's/,2,1,200,"//; s/"//')
-    if grep -q '45631641,null,true' <<< "$r"; then echo "Y 支持${cc:+（地区 $cc）}"; else echo "N 不支持"; fi
+    if grep -q '45631641,null,true' <<< "$r"; then echo "Y 支持${cc:+（地区 $cc）}"; else echo "? 无法判断"; fi
 }
 
 unlock_check() {
