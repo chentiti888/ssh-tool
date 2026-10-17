@@ -4,7 +4,7 @@
 #  用法：bash ssh-tool.sh
 # =============================================================
 
-TOOL_VER="2.9"   # 每次发新版改一下, 更新时会显示
+TOOL_VER="3.0"   # 每次发新版改一下, 更新时会显示
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; CYAN='\033[36m'; NC='\033[0m'
 SSHD_CONF="/etc/ssh/sshd_config"
 KEY_DIR="/root/.ssh/keys"
@@ -1395,11 +1395,21 @@ ping_menu() {
 # ---------------- 回程线路检测 ----------------
 # 从本机 traceroute 到国内 4 个城市的电信/联通/移动, 按经过的骨干网 IP 段判断线路类型
 # 判断规则参考开源项目 oneclickvirt/backtrace (IP 段 + 经过顺序), 结果是推测, 仅供参考
+# 每个目标: 名称 首选IP 运营商 备用IP...
+# 备用 IP 取自 spiritLHLS/icmp_targets (MIT 协议) 2026-10-16 的数据: 各省会回应 ping 的地址, 首选不回应时换着试
 RT_TARGETS=(
-    "北京电信 219.141.140.10 CT" "北京联通 202.106.195.68 CU" "北京移动 221.179.155.161 CM"
-    "上海电信 202.96.209.133 CT" "上海联通 210.22.97.1 CU"    "上海移动 211.136.112.200 CM"
-    "广州电信 58.60.188.222 CT"  "广州联通 210.21.196.6 CU"   "广州移动 120.196.165.24 CM"
-    "成都电信 61.139.2.69 CT"    "成都联通 119.6.6.6 CU"      "成都移动 211.137.96.205 CM"
+    "北京电信 219.141.140.10 CT 106.37.68.13 106.37.68.245"
+    "北京联通 202.106.195.68 CU 221.222.185.232 221.222.185.246"
+    "北京移动 221.179.155.161 CM 211.136.25.153 211.136.25.12"
+    "上海电信 202.96.209.133 CT 101.226.94.50 101.226.94.13"
+    "上海联通 210.22.97.1 CU 112.64.235.107 112.64.235.17"
+    "上海移动 211.136.112.200 CM 117.185.117.117 117.185.117.17"
+    "广州电信 58.60.188.222 CT 14.22.119.35 14.22.119.2"
+    "广州联通 210.21.196.6 CU 122.13.24.8 122.13.24.1"
+    "广州移动 120.196.165.24 CM 211.139.145.129 211.139.145.13"
+    "成都电信 61.139.2.69 CT 118.112.1.150 118.112.1.245"
+    "成都联通 119.6.6.6 CU 119.6.217.100 119.6.217.10"
+    "成都移动 211.137.96.205 CM 36.133.60.2 36.133.60.241"
 )
 
 # 每一跳的 IP -> 所属骨干网
@@ -1463,6 +1473,25 @@ rt_classify() {  # rt_classify 运营商(CT/CU/CM) 解析文件 -> 线路名称
         }' "$2"
 }
 
+rt_one() {  # rt_one 输出前缀 运营商 IP... : 最多试 3 次 (换备用 IP / 换探测方式), 判断出线路就停
+    local out=$1 c=$2 ip k=0 label best="" bestn=-1 n
+    shift 2
+    for ip in "$@"; do
+        k=$((k + 1)); ((k > 3)) && break
+        if ((k < 3)); then
+            traceroute -n -I -q 1 -w 2 -m 30 "$ip" > "$out.raw" 2>/dev/null       # ICMP
+        else
+            traceroute -n -T -p 80 -q 1 -w 2 -m 30 "$ip" > "$out.raw" 2>/dev/null # 最后一次换 TCP, 有的线路只放行 TCP
+        fi
+        rt_parse "$out.raw" > "$out.try"
+        label=$(rt_classify "$c" "$out.try")
+        n=$(awk '$4 != ""' "$out.try" | wc -l)                         # 认出骨干网的跳数
+        if ((n > bestn)); then bestn=$n; cp "$out.try" "$out.hops"; echo "$ip $k" > "$out.used"; fi
+        [[ "$label" == *线路* ]] && break                                 # 已判断出线路
+    done
+    rm -f "$out.raw" "$out.try"
+}
+
 ensure_traceroute() {
     command -v traceroute >/dev/null 2>&1 && return 0
     local yn
@@ -1481,44 +1510,47 @@ ensure_traceroute() {
 }
 
 route_check() {
-    local t i name ip c line label last ms c1 c2 sel myip
+    local t i name ip c alts tries line label last ms c1 c2 sel myip
     echo
     echo -e "${CYAN}========== 回程线路检测 ==========${NC}"
     echo " 回程 = 数据从这台服务器回到国内的路线，决定你下载/看视频的速度和稳定性"
     echo " 检测北京、上海、广州、成都的电信 / 联通 / 移动，约 30 秒"
     ensure_traceroute || return
     t=$(mktemp -d)
-    printf ' 检测中 ...'
+    printf ' 检测中（判断不出的会换备用地址重试，约 30～90 秒）...'
     for i in "${!RT_TARGETS[@]}"; do
-        read -r name ip c <<< "${RT_TARGETS[i]}"
-        ( traceroute -n -I -q 1 -w 1 -m 30 "$ip" > "$t/$i.raw" 2>/dev/null
-          [[ -s "$t/$i.raw" ]] || traceroute -n -q 1 -w 1 -m 30 "$ip" > "$t/$i.raw" 2>/dev/null
-          rt_parse "$t/$i.raw" > "$t/$i.hops" ) &
+        read -r name ip c alts <<< "${RT_TARGETS[i]}"
+        # shellcheck disable=SC2086
+        rt_one "$t/$i" "$c" "$ip" $alts &
     done
     wait
     printf '\r\033[K'
     echo -e "${CYAN}检测结果${NC}（线路是根据途经的骨干网推测的）"
     for i in "${!RT_TARGETS[@]}"; do
-        read -r name ip c <<< "${RT_TARGETS[i]}"
+        read -r name ip c _ <<< "${RT_TARGETS[i]}"
+        [[ -f "$t/$i.used" ]] && read -r ip tries < "$t/$i.used"
         label=$(rt_classify "$c" "$t/$i.hops")
         # 到达目标的延迟; 目标没回应时不显示中途某一跳的延迟, 免得误导
         ms=$(awk -v ip="$ip" '$2 == ip && $3 != "-" {printf "%.0f ms", $3; exit}' "$t/$i.hops")
         case "$label" in
             *精品*) c1=$GREEN ;; *优质*) c1=$CYAN ;; *普通*) c1=$YELLOW ;; *) c1=$NC ;;
         esac
-        printf ' %s  %b%s%b  %s\n' "$name" "$c1" "$label" "$NC" "${ms:-目标没回应}"
+        printf ' %s  %b%s%b  %s\n' "$name" "$c1" "$label" "$NC" "${ms:-终点不回应}"
     done
     echo
     echo " 说明：精品 > 优质 > 普通。电信 CN2 GIA、移动 CMIN2、联通 9929 一般最稳；163/4837/CMI 晚高峰容易拥堵"
+    echo " 终点不回应：目标地址不回 ping，只是测不到延迟，线路判断照样有效"
+    echo " 没看到骨干网 / 无法判断：途中路由器不回应探测，换了备用地址和方式还是看不到，多测几次或换时间再测"
     echo " 去程（国内到这台）在服务器上测不了，要从国内发起。可在手机/电脑浏览器打开："
     myip=$(curl -s4 --max-time 5 ip.sb 2>/dev/null)
     echo -e "   ${CYAN}https://www.itdog.cn/tracert/${myip:-你的服务器IP}${NC}"
     echo
     read -rp "查看某一条的详细路由？输入序号 1-${#RT_TARGETS[@]}（回车跳过）: " sel
     if [[ "$sel" =~ ^[0-9]+$ ]] && ((sel >= 1 && sel <= ${#RT_TARGETS[@]})); then
-        read -r name ip c <<< "${RT_TARGETS[sel-1]}"
+        read -r name ip c _ <<< "${RT_TARGETS[sel-1]}"
+        [[ -f "$t/$((sel - 1)).used" ]] && read -r ip tries < "$t/$((sel - 1)).used"
         echo
-        echo -e "${CYAN}${name}（${ip}）详细路由${NC}"
+        echo -e "${CYAN}${name}（${ip}，第 ${tries:-1} 次尝试）详细路由${NC}"
         printf ' %-4s %-16s %-9s %s\n' "跳" "IP" "延迟" "骨干网"
         while read -r h hip hms has; do
             case "$has" in
