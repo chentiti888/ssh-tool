@@ -4,7 +4,7 @@
 #  用法：bash ssh-tool.sh
 # =============================================================
 
-TOOL_VER="2.5"   # 每次发新版改一下, 更新时会显示
+TOOL_VER="2.6"   # 每次发新版改一下, 更新时会显示
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; CYAN='\033[36m'; NC='\033[0m'
 SSHD_CONF="/etc/ssh/sshd_config"
 KEY_DIR="/root/.ssh/keys"
@@ -18,8 +18,8 @@ err()  { echo -e "${RED}[×]${NC} $*"; }
 [[ $EUID -ne 0 ]] && { err "请使用 root 运行"; exit 1; }
 
 # ---------------- 快捷命令（想改名就改这里） ----------------
-CMD_NAME="cc"
-OLD_CMDS=("sshm" "ssb" "chen")   # 曾经用过的旧命令名，运行时自动清理
+CMD_NAME="ssb"
+OLD_CMDS=("sshm" "chen" "cc")   # 曾经用过的旧命令名，运行时自动清理
 CMD_PATH="/usr/local/bin/${CMD_NAME}"
 
 # 脚本在 GitHub 仓库里的 raw 地址（上传仓库后按实际仓库名修改）

@@ -7,13 +7,13 @@
 ## 一键安装并启动
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/chentiti888/ssh-tool/main/ssh-tool.sh -o /usr/local/bin/cc && chmod +x /usr/local/bin/cc && cc
+curl -fsSL https://raw.githubusercontent.com/chentiti888/ssh-tool/main/ssh-tool.sh -o /usr/local/bin/ssb && chmod +x /usr/local/bin/ssb && ssb
 ```
 
-这条命令会把脚本下载为快捷命令 `cc` 并直接打开菜单，之后在任意目录输入：
+这条命令会把脚本下载为快捷命令 `ssb` 并直接打开菜单，之后在任意目录输入：
 
 ```bash
-cc
+ssb
 ```
 
 > 先下载成文件再运行，快捷命令一定会保存下来。
@@ -134,6 +134,6 @@ cc
 
 ## 自定义
 
-- 快捷命令名：修改脚本中的 `CMD_NAME="cc"`。
+- 快捷命令名：修改脚本中的 `CMD_NAME="ssb"`。
 - 仓库地址：修改脚本中的 `SCRIPT_URL`，用于通过 curl 运行时自动安装快捷命令和菜单里的更新。
 - 公钥地址：**SSH 安全 → 3 导入公钥 → 3 修改拉取地址**。可以填 `用户名/仓库名`、GitHub 文件网页地址、GitHub 用户名（取账号里登记的公钥）或任意 https 直链，保存前会试拉一次；改过的地址存在 `/etc/ssh-tool.conf`，更新脚本不会丢，输入 `default` 恢复默认。这个仓库**只能放公钥**；能修改它的人就能决定谁能登录你的服务器，请给 GitHub 账号开启两步验证。
