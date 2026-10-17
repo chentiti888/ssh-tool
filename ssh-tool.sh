@@ -4,7 +4,7 @@
 #  用法：bash ssh-tool.sh
 # =============================================================
 
-TOOL_VER="2.4"   # 每次发新版改一下, 更新时会显示
+TOOL_VER="2.5"   # 每次发新版改一下, 更新时会显示
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; CYAN='\033[36m'; NC='\033[0m'
 SSHD_CONF="/etc/ssh/sshd_config"
 KEY_DIR="/root/.ssh/keys"
@@ -1392,6 +1392,269 @@ ping_menu() {
     fi
 }
 
+# ---------------- 回程线路检测 ----------------
+# 从本机 traceroute 到国内 4 个城市的电信/联通/移动, 按经过的骨干网 IP 段判断线路类型
+# 判断规则参考开源项目 oneclickvirt/backtrace (IP 段 + 经过顺序), 结果是推测, 仅供参考
+RT_TARGETS=(
+    "北京电信 219.141.140.10 CT" "北京联通 202.106.195.68 CU" "北京移动 221.179.155.161 CM"
+    "上海电信 202.96.209.133 CT" "上海联通 210.22.97.1 CU"    "上海移动 211.136.112.200 CM"
+    "广州电信 58.60.188.222 CT"  "广州联通 210.21.196.6 CU"   "广州移动 120.196.165.24 CM"
+    "成都电信 61.139.2.69 CT"    "成都联通 119.6.6.6 CU"      "成都移动 211.137.96.205 CM"
+)
+
+# 每一跳的 IP -> 所属骨干网
+RT_ASN_AWK='
+function asn(ip,  a) {
+    split(ip, a, ".")
+    if (ip ~ /^59\.43\./) return "AS4809"
+    if (ip ~ /^202\.97\./) return "AS4134"
+    if (ip ~ /^(218\.105|210\.51)\./) return "AS9929"
+    if (ip ~ /^(202\.77|43\.252|61\.14)\./) return "AS10099"
+    if (ip ~ /^219\.158\./) return "AS4837"
+    if (a[1] == 223 && ((a[2] == 118 && a[3] == 32) || (a[2] == 120 && a[3] >= 128) ||
+        (a[2] == 119 && (a[3] == 8 || a[3] == 9 || (a[3] >= 10 && a[3] <= 15) || (a[3] >= 26 && a[3] <= 29) ||
+         (a[3] >= 32 && a[3] <= 37) || a[3] == 74 || a[3] == 75 || a[3] == 88 || a[3] == 89 ||
+         a[3] == 100 || a[3] == 252 || a[3] == 253)))) return "AS58807"
+    if (ip ~ /^223\.(118|119|120|121)\./) return "AS58453"
+    if (ip ~ /^(221\.183|111\.24)\./) return "AS9808"
+    if (ip ~ /^(69\.194|203\.22)\./) return "AS23764"
+    return ""
+}
+'
+
+rt_parse() {  # rt_parse traceroute输出文件 : 每跳一行 "跳数 IP 毫秒 骨干网"
+    awk "$RT_ASN_AWK"'
+        $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9.]+$/ { ms = ($3 ~ /^[0-9.]+$/) ? $3 : "-"; print $1, $2, ms, asn($2) }
+        $1 ~ /^[0-9]+$/ && $2 == "*"       { print $1, "*", "-", "" }' "$1"
+}
+
+rt_classify() {  # rt_classify 运营商(CT/CU/CM) 解析文件 -> 线路名称
+    awk -v c="$1" '
+        { if ($4 != "") { n[$4]++; if (!($4 in f)) f[$4] = NR } }
+        function first(k) { return (k in f) ? f[k] : -1 }
+        END {
+            if (c == "CT") {
+                if (first("AS4809") >= 0) {
+                    if (n["AS4809"] < 2) { print "电信CN2混合 [优质线路]"; exit }
+                    if (first("AS4134") < 0 || (f["AS4809"] < f["AS4134"] && n["AS4134"] <= 1)) { print "电信CN2 GIA [精品线路]"; exit }
+                    if (f["AS4809"] < f["AS4134"]) { print "电信CN2混合 [优质线路]"; exit }
+                    print "电信CN2 GT [优质线路]"; exit
+                }
+                if (first("AS23764") >= 0) { print "电信CTGNET [精品线路]"; exit }
+                if (n["AS4134"] > 1) { print "电信163 [普通线路]"; exit }
+                print (n["AS4134"] == 1) ? "只看到电信入口，无法判断" : "没看到电信骨干网"; exit
+            }
+            if (c == "CU") {
+                if (first("AS9929") >= 0) {
+                    if (first("AS4837") >= 0 && f["AS4837"] < f["AS9929"]) { print "联通9929混合 [优质线路]"; exit }
+                    print "联通9929 [优质线路]"; exit
+                }
+                if (first("AS10099") >= 0) { print "联通CUG [优质线路]"; exit }
+                if (n["AS4837"] > 1) { print "联通4837 [普通线路]"; exit }
+                print (n["AS4837"] == 1) ? "只看到联通入口，无法判断" : "没看到联通骨干网"; exit
+            }
+            if (first("AS58807") >= 0) {
+                if (first("AS58453") >= 0 && f["AS58453"] < f["AS58807"]) { print "移动CMIN2混合 [优质线路]"; exit }
+                print "移动CMIN2 [精品线路]"; exit
+            }
+            if (first("AS58453") >= 0) { print "移动CMI [普通线路]"; exit }
+            if (first("AS9808") >= 0) { print "移动CMNET [普通线路]"; exit }
+            print "没看到移动骨干网"
+        }' "$2"
+}
+
+ensure_traceroute() {
+    command -v traceroute >/dev/null 2>&1 && return 0
+    local yn
+    read -rp "需要安装 traceroute（很小，只在检测时运行），现在安装？[Y/n]: " yn
+    [[ "$yn" =~ ^[Nn]$ ]] && return 1
+    info "正在安装 traceroute ..."
+    if command -v apt-get >/dev/null; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq traceroute >/dev/null 2>&1 ||
+            { apt-get update -qq >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq traceroute >/dev/null 2>&1; }
+    elif command -v dnf >/dev/null; then dnf install -y -q traceroute >/dev/null 2>&1
+    elif command -v yum >/dev/null; then yum install -y -q traceroute >/dev/null 2>&1
+    elif command -v apk >/dev/null; then apk add --quiet traceroute >/dev/null 2>&1
+    fi
+    command -v traceroute >/dev/null 2>&1 && return 0
+    err "traceroute 安装失败"; return 1
+}
+
+route_check() {
+    local t i name ip c line label last ms c1 c2 sel myip
+    echo
+    echo -e "${CYAN}========== 回程线路检测 ==========${NC}"
+    echo " 回程 = 数据从这台服务器回到国内的路线，决定你下载/看视频的速度和稳定性"
+    echo " 检测北京、上海、广州、成都的电信 / 联通 / 移动，约 30 秒"
+    ensure_traceroute || return
+    t=$(mktemp -d)
+    printf ' 检测中 ...'
+    for i in "${!RT_TARGETS[@]}"; do
+        read -r name ip c <<< "${RT_TARGETS[i]}"
+        ( traceroute -n -I -q 1 -w 1 -m 30 "$ip" > "$t/$i.raw" 2>/dev/null
+          [[ -s "$t/$i.raw" ]] || traceroute -n -q 1 -w 1 -m 30 "$ip" > "$t/$i.raw" 2>/dev/null
+          rt_parse "$t/$i.raw" > "$t/$i.hops" ) &
+    done
+    wait
+    printf '\r\033[K'
+    echo -e "${CYAN}检测结果${NC}（线路是根据途经的骨干网推测的）"
+    for i in "${!RT_TARGETS[@]}"; do
+        read -r name ip c <<< "${RT_TARGETS[i]}"
+        label=$(rt_classify "$c" "$t/$i.hops")
+        # 到达目标的延迟; 目标没回应时不显示中途某一跳的延迟, 免得误导
+        ms=$(awk -v ip="$ip" '$2 == ip && $3 != "-" {printf "%.0f ms", $3; exit}' "$t/$i.hops")
+        case "$label" in
+            *精品*) c1=$GREEN ;; *优质*) c1=$CYAN ;; *普通*) c1=$YELLOW ;; *) c1=$NC ;;
+        esac
+        printf ' %s  %b%s%b  %s\n' "$name" "$c1" "$label" "$NC" "${ms:-目标没回应}"
+    done
+    echo
+    echo " 说明：精品 > 优质 > 普通。电信 CN2 GIA、移动 CMIN2、联通 9929 一般最稳；163/4837/CMI 晚高峰容易拥堵"
+    echo " 去程（国内到这台）在服务器上测不了，要从国内发起。可在手机/电脑浏览器打开："
+    myip=$(curl -s4 --max-time 5 ip.sb 2>/dev/null)
+    echo -e "   ${CYAN}https://www.itdog.cn/tracert/${myip:-你的服务器IP}${NC}"
+    echo
+    read -rp "查看某一条的详细路由？输入序号 1-${#RT_TARGETS[@]}（回车跳过）: " sel
+    if [[ "$sel" =~ ^[0-9]+$ ]] && ((sel >= 1 && sel <= ${#RT_TARGETS[@]})); then
+        read -r name ip c <<< "${RT_TARGETS[sel-1]}"
+        echo
+        echo -e "${CYAN}${name}（${ip}）详细路由${NC}"
+        printf ' %-4s %-16s %-9s %s\n' "跳" "IP" "延迟" "骨干网"
+        while read -r h hip hms has; do
+            case "$has" in
+                AS4809) has="电信CN2" ;; AS4134) has="电信163" ;; AS23764) has="电信CTGNET" ;;
+                AS9929) has="联通9929" ;; AS10099) has="联通CUG" ;; AS4837) has="联通4837" ;;
+                AS58807) has="移动CMIN2" ;; AS58453) has="移动CMI" ;; AS9808) has="移动CMNET" ;;
+            esac
+            printf ' %-4s %-16s %-9s %s\n' "$h" "$hip" "$([[ "$hms" == - ]] && echo - || echo "${hms}ms")" "$has"
+        done < "$t/$((sel - 1)).hops"
+    fi
+    rm -rf "$t"
+}
+
+# ---------------- 流媒体 / AI 解锁检测 ----------------
+# 判断方法参考开源项目 lmc999/RegionRestrictionCheck; 平台改版后可能不准, 结果仅供参考
+UA_WEB="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+
+ul_netflix() {
+    local r1 r2 region
+    r1=$(curl $UL_OPT -fsL 'https://www.netflix.com/title/81280792' -H 'accept-language: en-US,en;q=0.9' -A "$UA_WEB")
+    r2=$(curl $UL_OPT -fsL 'https://www.netflix.com/title/70143836' -H 'accept-language: en-US,en;q=0.9' -A "$UA_WEB")
+    [[ -z "$r1" || -z "$r2" ]] && { echo "? 检测失败（连不上）"; return; }
+    if grep -q 'Oh no!' <<< "$r1" && grep -q 'Oh no!' <<< "$r2"; then echo "! 仅自制剧"; return; fi
+    region=$(sed -n 's/.*"id":"\([^"]*\)".*"countryName":"[^"]*".*/\1/p' <<< "$r1" | head -1)
+    echo "Y 完整解锁${region:+（地区 $region）}"
+}
+
+ul_disney() {
+    local u
+    u=$(curl $UL_OPT -sL 'https://www.disneyplus.com' -o /dev/null -w '%{http_code} %{url_effective}' -A "$UA_WEB")
+    [[ -z "$u" || "$u" == 000* ]] && { echo "? 检测失败（连不上）"; return; }
+    [[ "$u" == 403* ]] && { echo "N 不支持（IP 被封）"; return; }
+    if [[ "$u" =~ preview|unavailable ]]; then echo "N 不支持"; else echo "Y 可访问（简易判断）"; fi
+}
+
+ul_youtube() {
+    local r region
+    r=$(curl $UL_OPT -sL 'https://www.youtube.com/premium' -H 'accept-language: en-US,en;q=0.9' \
+        -H 'cookie: SOCS=CAISOAgDEitib3FfaWRlbnRpdHlmcm9udGVuZHVpc2VydmVyXzIwMjQwNTI2LjAxX3AwGgV6aC1DTiACGgYIgMnpsgY; PREF=f7=4000' -A "$UA_WEB")
+    [[ -z "$r" ]] && { echo "? 检测失败（连不上）"; return; }
+    grep -q 'www.google.cn' <<< "$r" && { echo "N 不支持（地区 CN）"; return; }
+    grep -qi 'Premium is not available in your country' <<< "$r" && { echo "N 不支持"; return; }
+    region=$(grep -o '"INNERTUBE_CONTEXT_GL" *: *"[^"]*"' <<< "$r" | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+    if grep -qi 'ad-free' <<< "$r"; then echo "Y 支持${region:+（地区 $region）}"; else echo "? 检测失败（页面异常）"; fi
+}
+
+ul_prime() {
+    local r region
+    r=$(curl $UL_OPT -sL 'https://www.primevideo.com' -A "$UA_WEB")
+    [[ -z "$r" ]] && { echo "? 检测失败（连不上）"; return; }
+    grep -qi 'isServiceRestricted' <<< "$r" && { echo "N 不支持"; return; }
+    region=$(grep -o '"currentTerritory":"[^"]*"' <<< "$r" | head -1 | cut -d'"' -f4)
+    if [[ -n "$region" ]]; then echo "Y 支持（地区 $region）"; else echo "? 检测失败（页面异常）"; fi
+}
+
+ul_chatgpt() {
+    local r1 r2 loc
+    r1=$(curl $UL_OPT -s 'https://api.openai.com/compliance/cookie_requirements' -H 'authorization: Bearer null' \
+        -H 'origin: https://platform.openai.com' -H 'referer: https://platform.openai.com/' -A "$UA_WEB")
+    r2=$(curl $UL_OPT -s 'https://ios.chat.openai.com/' -A "$UA_WEB")
+    [[ -z "$r1" || -z "$r2" ]] && { echo "? 检测失败（连不上）"; return; }
+    loc=$(curl $UL_OPT -s 'https://chatgpt.com/cdn-cgi/trace' | sed -n 's/^loc=//p')
+    local a=0 b=0
+    grep -qi 'unsupported_country' <<< "$r1" && a=1
+    grep -qi 'VPN' <<< "$r2" && b=1
+    if ((a == 0 && b == 0)); then echo "Y 支持${loc:+（地区 $loc）}"
+    elif ((a == 1 && b == 1)); then echo "N 不支持${loc:+（地区 $loc）}"
+    elif ((a == 0)); then echo "! 仅网页版可用（App 不行）"
+    else echo "! 仅 App 可用（网页版不行）"; fi
+}
+
+ul_claude() {
+    local u
+    u=$(curl $UL_OPT -sL -o /dev/null -w '%{url_effective}' -A "$UA_WEB" 'https://claude.ai/')
+    [[ -z "$u" ]] && { echo "? 检测失败（连不上）"; return; }
+    case "$u" in
+        https://claude.ai/*) echo "Y 支持" ;;
+        *app-unavailable-in-region*) echo "N 不支持（地区限制）" ;;
+        *) echo "? 无法判断（跳转到 ${u:0:40}）" ;;
+    esac
+}
+
+ul_gemini() {
+    local r cc
+    r=$(curl $UL_OPT -sL 'https://gemini.google.com' -A "$UA_WEB")
+    [[ -z "$r" ]] && { echo "? 检测失败（连不上）"; return; }
+    cc=$(grep -o ',2,1,200,"[A-Z]\{3\}"' <<< "$r" | head -1 | sed 's/,2,1,200,"//; s/"//')
+    if grep -q '45631641,null,true' <<< "$r"; then echo "Y 支持${cc:+（地区 $cc）}"; else echo "N 不支持"; fi
+}
+
+unlock_check() {
+    local c t i n v ipinfo f
+    local -a names=("Netflix" "Disney+" "YouTube Premium" "Prime Video" "ChatGPT" "Claude" "Gemini")
+    local -a funcs=(ul_netflix ul_disney ul_youtube ul_prime ul_chatgpt ul_claude ul_gemini)
+    echo
+    echo -e "${CYAN}========== 流媒体 / AI 解锁检测 ==========${NC}"
+    echo " 1) 用 IPv4 检测"
+    echo " 2) 用 IPv6 检测"
+    echo " 3) 完整检测（运行第三方脚本 RegionRestrictionCheck，项目更多更准）"
+    echo -e " 0) ${GREEN}返回${NC}"
+    read -rp "请选择 [1]: " c
+    case "${c:-1}" in
+        1) UL_OPT="-4 --max-time 10" ;;
+        2) curl -6 -s --max-time 5 https://www.cloudflare.com/cdn-cgi/trace >/dev/null 2>&1 || { err "这台服务器没有可用的 IPv6"; return; }
+           UL_OPT="-6 --max-time 10" ;;
+        3)
+            warn "将下载并以 root 运行第三方脚本（github.com/lmc999/RegionRestrictionCheck），请确认你信任它"
+            read -rp "继续？[y/N]: " c
+            [[ "$c" =~ ^[Yy]$ ]] || return
+            bash <(curl -L -s https://raw.githubusercontent.com/lmc999/RegionRestrictionCheck/main/check.sh) -M 4
+            return ;;
+        *) return ;;
+    esac
+    ipinfo=$(curl $UL_OPT -s https://www.cloudflare.com/cdn-cgi/trace)
+    echo " 出口 IP：$(sed -n 's/^ip=//p' <<< "$ipinfo")    地区：$(sed -n 's/^loc=//p' <<< "$ipinfo")"
+    printf ' 检测中（约 10 秒）...'
+    t=$(mktemp -d)
+    for i in "${!funcs[@]}"; do ( "${funcs[i]}" > "$t/$i" 2>/dev/null ) & done
+    wait
+    printf '\r\033[K'
+    for i in "${!funcs[@]}"; do
+        ((i == 0)) && echo -e "${CYAN}流媒体${NC}"
+        ((i == 4)) && echo -e "${CYAN}AI${NC}"
+        v=$(cat "$t/$i"); f=${v:0:1}; v=${v:2}
+        case "$f" in
+            Y) printf '  %-16s %b✔ %s%b\n' "${names[i]}" "$GREEN" "$v" "$NC" ;;
+            N) printf '  %-16s %b✘ %s%b\n' "${names[i]}" "$RED" "$v" "$NC" ;;
+            !) printf '  %-16s %b! %s%b\n' "${names[i]}" "$YELLOW" "$v" "$NC" ;;
+            *) printf '  %-16s ? %s\n' "${names[i]}" "${v:-检测失败}" ;;
+        esac
+    done
+    rm -rf "$t"
+    echo
+    echo " 说明：结果按各平台网页的特征判断，平台改版后可能不准；Disney+ 只做了简易判断，要准确请用 3 完整检测"
+}
+
 # ---------------- 更新脚本 ----------------
 update_self() {
     local url tmp oldv newv yn
@@ -1489,6 +1752,24 @@ menu_net() {  # 网络设置
     done
 }
 
+menu_check() {  # 网络检测
+    local c
+    while true; do
+        echo
+        echo -e "${CYAN}========== 网络检测 ==========${NC}"
+        echo " 1) 回程线路检测（电信 / 联通 / 移动）"
+        echo " 2) 流媒体 / AI 解锁检测"
+        echo -e " 0) ${GREEN}返回${NC}"
+        read -rp "请选择: " c || return
+        case "$c" in
+            1) route_check; pause ;;
+            2) unlock_check; pause ;;
+            0|q|Q) return ;;
+            *) err "无效选择" ;;
+        esac
+    done
+}
+
 while true; do
     echo
     echo -e "${CYAN}========== SSH 小工具 v${TOOL_VER} ==========${NC}"
@@ -1497,7 +1778,8 @@ while true; do
     echo " 2) SSH 安全      端口 / 密钥 / 密码登录"
     echo " 3) 性能检测      CPU 占用 / CPU / 内存 / 硬盘"
     echo " 4) 网络设置      BBR / 禁 Ping / 端口转发"
-    echo " 5) 更新脚本"
+    echo " 5) 网络检测      回程线路 / 流媒体 / AI 解锁"
+    echo " 6) 更新脚本"
     echo -e " 0) ${RED}退出${NC}"
     read -rp "请选择: " c || exit 0
     case "$c" in
@@ -1505,7 +1787,8 @@ while true; do
         2) menu_ssh ;;
         3) menu_perf ;;
         4) menu_net ;;
-        5) update_self; pause ;;
+        5) menu_check ;;
+        6) update_self; pause ;;
         0|q|Q) exit 0 ;;
         *) err "无效选择" ;;
     esac
